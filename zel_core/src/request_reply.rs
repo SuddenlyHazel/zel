@@ -1,8 +1,8 @@
-mod auth;
-mod connection;
-mod error;
-mod service;
-mod transport;
+pub mod server;
+pub mod client;
+
+pub use server::*;
+pub use client::*;
 
 #[cfg(test)]
 mod ztest;

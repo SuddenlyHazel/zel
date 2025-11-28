@@ -1,7 +1,5 @@
 use iroh::{
-    Endpoint, SecretKey,
-    endpoint::BindError,
-    protocol::{DynProtocolHandler, Router, RouterBuilder},
+    Endpoint, SecretKey, discovery::dns::DnsDiscovery, endpoint::BindError, protocol::{DynProtocolHandler, Router, RouterBuilder}
 };
 use log::warn;
 use std::time::Duration;
@@ -124,7 +122,7 @@ impl IrohBundle {
     /// # Errors
     /// Returns [`BuilderError`] if the endpoint fails to bind to a network address.
     pub async fn builder(secret_key: Option<SecretKey>) -> Result<Builder, BuilderError> {
-        let mut endpoint = iroh::Endpoint::builder();
+        let mut endpoint = iroh::Endpoint::builder().discovery(DnsDiscovery::n0_dns());
         if let Some(secret_key) = secret_key {
             endpoint = endpoint.secret_key(secret_key);
         }

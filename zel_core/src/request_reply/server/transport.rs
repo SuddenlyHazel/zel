@@ -8,6 +8,12 @@ pub struct TxRx {
     pub(crate) recv: RecvStream,
 }
 
+impl TxRx {
+    pub fn new(send: SendStream, recv: RecvStream) -> Self {
+        Self { send, recv }
+    }
+}
+
 impl AsyncWrite for TxRx {
     fn poll_write(
         self: Pin<&mut Self>,
