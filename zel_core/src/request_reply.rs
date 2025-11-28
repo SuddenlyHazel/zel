@@ -1,4 +1,4 @@
-use std::{fmt::Debug, marker::PhantomData, pin::Pin, sync::Arc, time::Duration};
+use std::{fmt::Debug, marker::PhantomData, pin::Pin, sync::Arc};
 
 use anyhow::Context;
 use futures::{SinkExt, StreamExt};
@@ -10,8 +10,8 @@ use iroh::{
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite, Sink};
-use tokio_util::codec::{Framed, FramedParts, LengthDelimitedCodec};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 #[derive(Debug)]
 pub struct Handler<Req, Reply> {
