@@ -4,7 +4,7 @@ use iroh::PublicKey;
 use tokio::sync::Mutex;
 
 use crate::{
-    Handler, IrohBundle, Service,
+    Handler, IrohBundle, Service, ServiceError,
     request_reply::{new_client, service::fn_handler},
 };
 
@@ -17,7 +17,7 @@ impl Service for EchoService {
 
     async fn serve(
         &self,
-        peer: iroh::PublicKey,
+        _peer: iroh::PublicKey,
         request: Self::Request,
     ) -> Result<Self::Reply, super::ServiceError> {
         Ok(server_fmt(&request))
@@ -105,6 +105,71 @@ async fn fn_handler_send_and_receive() -> anyhow::Result<()> {
     let r1 = client.request(&r).await?;
     assert_eq!(r1, server_fmt("server(Heck)"));
     tokio::time::sleep(Duration::from_secs(1)).await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn async_fn_handler_send_and_receive() -> anyhow::Result<()> {
+    let _ = env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Info)
+        .try_init();
+
+    async fn my_handler(
+        peer: PublicKey,
+        req: String,
+        test: Arc<Mutex<BTreeMap<PublicKey, String>>>,
+    ) -> Result<String, ServiceError> {
+        let mut locked = test.lock().await;
+        locked.insert(peer, req.clone());
+        Ok(server_fmt(&req))
+    }
+
+    let data: BTreeMap<PublicKey, String> = BTreeMap::new();
+    let data = Arc::new(Mutex::new(data));
+
+    let another_closure = |state: Arc<Mutex<BTreeMap<PublicKey, String>>>| {
+        move |l, r| my_handler(l, r, state.clone())
+    };
+
+    let handler = Handler::builder(fn_handler(another_closure(data.clone()))).build();
+
+    let server_bundle = IrohBundle::builder(None).await?.accept(ALPN, handler);
+    let server_bundle = server_bundle.finish().await;
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let client_bundle = IrohBundle::builder(None).await?.finish().await;
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let mut client = new_client::<String, String>(
+        client_bundle.endpoint.clone(),
+        server_bundle.endpoint.id(),
+        ALPN,
+    )
+    .await?;
+
+    let m = "Heck".to_string();
+    let r = client.request(&m).await?;
+    assert_eq!(r, server_fmt("Heck"));
+
+    {
+        let locked = data.lock().await;
+        assert_eq!(
+            locked.get(&client_bundle.endpoint.id()),
+            Some(&"Heck".to_string())
+        )
+    }
+
+    let r1 = client.request(&r).await?;
+    assert_eq!(r1, server_fmt("server(Heck)"));
+
+    {
+        let locked = data.lock().await;
+        assert_eq!(
+            locked.get(&client_bundle.endpoint.id()),
+            Some(&"server(Heck)".to_string())
+        )
+    }
 
     Ok(())
 }
