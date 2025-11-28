@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use futures::{SinkExt, StreamExt};
 use iroh::{
     Endpoint, PublicKey,
-    endpoint::{self, ConnectError, Connection, ConnectionError},
+    endpoint::{ConnectError, ConnectionError},
 };
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -33,7 +33,7 @@ pub enum ClientError {
     #[error("{0}")]
     InvalidResponse(anyhow::Error),
     #[error("{0}")]
-    ServiceError(#[from] ServiceError)
+    ServiceError(#[from] ServiceError),
 }
 
 impl<Req, Reply> Client<Req, Reply>

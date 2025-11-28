@@ -33,7 +33,7 @@ async fn send_and_receive() -> anyhow::Result<()> {
 
     let handler = Handler::builder(service).build();
 
-    let mut server_bundle = IrohBundle::builder(None).await?.accept(ALPN, handler);
+    let server_bundle = IrohBundle::builder(None).await?.accept(ALPN, handler);
     let server_bundle = server_bundle.finish().await;
 
     tokio::time::sleep(Duration::from_secs(1)).await;

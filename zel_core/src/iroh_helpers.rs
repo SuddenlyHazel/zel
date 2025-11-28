@@ -1,5 +1,8 @@
 use iroh::{
-    Endpoint, SecretKey, discovery::dns::DnsDiscovery, endpoint::BindError, protocol::{DynProtocolHandler, Router, RouterBuilder}
+    Endpoint, SecretKey,
+    discovery::dns::DnsDiscovery,
+    endpoint::BindError,
+    protocol::{DynProtocolHandler, Router, RouterBuilder},
 };
 use log::warn;
 use std::time::Duration;
