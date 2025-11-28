@@ -38,6 +38,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.100"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3990,11 +3996,16 @@ checksum = "2164e798d9e3d84ee2c91139ace54638059a3b23e361f5c11781c2c6459bde0f"
 name = "zel_core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "futures",
  "iroh",
  "log",
+ "postcard",
+ "serde",
+ "serde_json",
  "thiserror 2.0.17",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
