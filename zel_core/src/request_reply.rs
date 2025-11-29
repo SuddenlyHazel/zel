@@ -11,7 +11,7 @@ pub use auth::{AuthGuard, DynAuthGuard};
 pub use error::ServiceError;
 pub use transport::TxRx;
 
-use std::{fmt::Debug, marker::PhantomData, sync::Arc};
+use std::{fmt::Debug, marker::PhantomData};
 
 use iroh::{
     PublicKey,
@@ -25,7 +25,7 @@ use connection::handle_connection;
 
 use crate::request_reply::service::Service;
 
-pub struct Handler<Req, Reply, Svc, State: > {
+pub struct Handler<Req, Reply, Svc, State> {
     _req: PhantomData<Req>,
     _reply: PhantomData<Reply>,
     auth_guard: Option<Box<dyn DynAuthGuard>>,
@@ -33,11 +33,17 @@ pub struct Handler<Req, Reply, Svc, State: > {
     state: State,
 }
 
-impl <Req, Reply, Svc, State> Debug for Handler<Req, Reply, Svc, State> 
-    where State: Debug,
+impl<Req, Reply, Svc, State> Debug for Handler<Req, Reply, Svc, State>
+where
+    State: Debug,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Handler").field("_req", &self._req).field("_reply", &self._reply).field("auth_guard", &self.auth_guard).field("state", &self.state).finish()
+        f.debug_struct("Handler")
+            .field("_req", &self._req)
+            .field("_reply", &self._reply)
+            .field("auth_guard", &self.auth_guard)
+            .field("state", &self.state)
+            .finish()
     }
 }
 
@@ -64,9 +70,9 @@ where
     }
 }
 
-impl<Req, Reply, Svc, State> Handler<Req, Reply, Svc, State> 
-    where
-        Svc: Service<Req, State, Response = Reply>,
+impl<Req, Reply, Svc, State> Handler<Req, Reply, Svc, State>
+where
+    Svc: Service<Req, State, Response = Reply>,
 {
     async fn check_auth(&self, remote_id: PublicKey) -> Result<(), AcceptError> {
         // Get the guard or return ok if it isn't present
@@ -84,8 +90,7 @@ impl<Req, Reply, Svc, State> Handler<Req, Reply, Svc, State>
         return Err(AcceptError::from_err(ServiceError::NotAuthorized {}));
     }
 
-    pub fn builder(service: Svc, state: State) -> Builder<Req, Reply, State, Svc>
-    {
+    pub fn builder(service: Svc, state: State) -> Builder<Req, Reply, State, Svc> {
         Builder {
             guard: None,
             service,

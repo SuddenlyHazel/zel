@@ -1,4 +1,3 @@
-use std::sync::Arc;
 
 use anyhow::Context;
 use futures::{SinkExt, StreamExt};
@@ -11,13 +10,11 @@ use super::{service::Service, transport::TxRx};
 
 pub(crate) async fn handle_connection<Req, Svc, State>(
     connection: Connection,
-    service : Svc,
+    service: Svc,
     state: State,
-    //service: Arc<Box<dyn DynService<Request = Req, Reply = Reply>>>,
 ) -> anyhow::Result<()>
 where
     Req: DeserializeOwned + 'static,
-    //Reply: Serialize + 'static,
     Svc: Service<Req, State>,
     State: Clone,
     Svc::Response: Serialize + 'static,

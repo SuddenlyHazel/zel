@@ -1,15 +1,11 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use iroh::PublicKey;
-use log::debug;
 use tokio::sync::Mutex;
 
 use crate::{
     IrohBundle,
-    request_reply::{
-        Handler, ServiceError, new_client,
-        service::{Service, ServiceFn},
-    },
+    request_reply::{Handler, ServiceError, new_client, service::Service},
 };
 
 #[derive(Debug, Clone)]
@@ -22,7 +18,7 @@ impl Service<String, ()> for EchoService {
         &self,
         _peer: iroh::PublicKey,
         request: String,
-        state: (),
+        _state: (),
     ) -> Result<Self::Response, super::ServiceError> {
         Ok(server_fmt(&request))
     }
@@ -121,6 +117,7 @@ async fn multiple_clients() -> anyhow::Result<()> {
     let data: BTreeMap<PublicKey, String> = BTreeMap::new();
     let data = Arc::new(Mutex::new(data));
 
+    // Could do this..
     // let service = move |peer, req: String, data: Arc<Mutex<BTreeMap<PublicKey, String>>>| {
     //     async move {
     //         let mut locked = data.lock().await;
@@ -129,6 +126,7 @@ async fn multiple_clients() -> anyhow::Result<()> {
     //     }
     // };
 
+    // Or like this ^_^
     async fn service(
         peer: PublicKey,
         req: String,
