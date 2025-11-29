@@ -7,15 +7,20 @@ use log::{info, warn};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-use super::{service::DynService, transport::TxRx};
+use super::{service::Service, transport::TxRx};
 
-pub(crate) async fn handle_connection<Req, Reply>(
+pub(crate) async fn handle_connection<Req, Svc, State>(
     connection: Connection,
-    service: Arc<Box<dyn DynService<Request = Req, Reply = Reply>>>,
+    service : Svc,
+    state: State,
+    //service: Arc<Box<dyn DynService<Request = Req, Reply = Reply>>>,
 ) -> anyhow::Result<()>
 where
     Req: DeserializeOwned + 'static,
-    Reply: Serialize + 'static,
+    //Reply: Serialize + 'static,
+    Svc: Service<Req, State>,
+    State: Clone,
+    Svc::Response: Serialize + 'static,
 {
     let peer_id: PublicKey = connection.remote_id();
     let (send, recv) = connection
@@ -34,8 +39,8 @@ where
             continue;
         };
 
-        let service = service.as_ref();
-        let resp = serde_json::to_vec(&service.serve(peer_id, request).await)
+        let response = service.serve(peer_id, request, state.clone()).await;
+        let resp = serde_json::to_vec(&response)
             .context("failed to serialize the response something bad is happening")?;
 
         if let Err(e) = framed.send(resp.into()).await {

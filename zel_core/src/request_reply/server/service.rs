@@ -1,109 +1,112 @@
-use std::{fmt::Debug, future::Future, marker::PhantomData, pin::Pin};
+use std::{fmt::Debug, marker::PhantomData, pin::Pin};
 
 use iroh::PublicKey;
 
-use super::error::ServiceError;
+use crate::request_reply::ServiceError;
 
-pub trait Service: Send + Sync + std::fmt::Debug + 'static {
-    type Request;
-    type Reply;
-
+pub trait Service<Request, S>: Clone + Send + Sync + 'static {
+    type Response;
     fn serve(
         &self,
         peer: PublicKey,
-        request: Self::Request,
-    ) -> impl std::future::Future<Output = Result<Self::Reply, ServiceError>> + std::marker::Send;
+        request: Request,
+        state: S,
+    ) -> impl std::future::Future<Output = Result<Self::Response, ServiceError>> + std::marker::Send;
 }
 
-pub trait DynService: Send + Sync + std::fmt::Debug + 'static {
-    type Request;
-    type Reply;
-    fn serve(
-        &self,
-        peer: PublicKey,
-        request: Self::Request,
-    ) -> Pin<Box<dyn Future<Output = Result<Self::Reply, ServiceError>> + std::marker::Send + '_>>;
-}
+impl<F, Fut, Request, Response, State> Service<Request, State> for F
+where
+    F: Fn(PublicKey, Request, State) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<Response, ServiceError>> + Send + 'static,
+    Response: Clone + Send + Sync + 'static,
+{
+    //type Future = Fut;
 
-impl<P: Service> DynService for P {
-    type Request = P::Request;
-
-    type Reply = P::Reply;
+    type Response = Response;
 
     fn serve(
         &self,
         peer: PublicKey,
-        request: Self::Request,
-    ) -> Pin<Box<dyn Future<Output = Result<Self::Reply, ServiceError>> + std::marker::Send + '_>>
-    {
-        let f = self.serve(peer, request);
-        Box::pin(async move { f.await })
+        request: Request,
+        state: State,
+    ) -> impl std::future::Future<Output = Result<Response, ServiceError>> + std::marker::Send {
+        (self.clone())(peer, request, state)
     }
 }
 
-impl<T: Service> From<T> for Box<dyn DynService<Request = T::Request, Reply = T::Reply>> {
-    fn from(value: T) -> Self {
-        Box::new(value)
-    }
-}
-
-pub struct FnHandler<Req, Reply, F> {
+pub struct ServiceFn<F, Request, Response, State> {
     inner: F,
-    _phantom: std::marker::PhantomData<(Req, Reply)>,
+    _p: PhantomData<(Request, Response, State)>,
 }
 
-pub fn fn_handler<Req, Reply, F, Fut>(inner: F) -> FnHandler<Req, Reply, F>
-where
-    Fut: Future<Output = Result<Reply, ServiceError>> + Send + Sync,
-    F: Fn(PublicKey, Req) -> Fut + Send + Sync + 'static,
-{
-    FnHandler {
-        inner,
-        _phantom: PhantomData::default(),
-    }
-}
-
-impl<T, Req, Reply> Debug for FnHandler<T, Req, Reply> {
+impl<F, Request, Response, State> Debug for ServiceFn<F, Request, Response, State> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FnHandler").finish()
+        f.debug_struct("ServiceFn").finish()
     }
 }
 
-// impl<Req, Reply, P> Service for FnHandler<P>
-// where
-//     P: FnMut(Req) -> Reply,
-// {
-//     type Request = Req;
-//     type Reply = Reply;
-
-//     async fn serve(&self, peer: PublicKey, request: Req) -> Result<Reply, ServiceError> {
-//         todo!()
-//     }
-// }
-
-// impl<Req, Reply, Fn: FnMut(Req) -> Reply> From<FnHandler<Fn>>
-//     for Box<dyn DynService<Request = Req, Reply = Reply>>
-// {
-//     fn from(value: FnHandler<Fn>) -> Self {
-//         todo!()
-//     }
-// }
-
-impl<Req, Reply, Fut, HandleFn> Service for FnHandler<Req, Reply, HandleFn>
+impl<Request, Response, State, F, Fut> From<F> for ServiceFn<F, Request, Response, State>
 where
-    Req: Send + Sync + std::fmt::Debug + 'static,
-    Reply: Send + Sync + std::fmt::Debug + 'static,
-    Fut: Future<Output = Result<Reply, ServiceError>> + Send + Sync,
-    HandleFn: Fn(PublicKey, Req) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Response, ServiceError>> + Send + Sync,
+    F: Fn(PublicKey, Request, State) -> Fut + Send + Sync + 'static,
 {
-    type Request = Req;
-    type Reply = Reply;
+    fn from(inner: F) -> Self {
+        Self {
+            inner,
+            _p: PhantomData::default(),
+        }
+    }
+}
 
-    async fn serve(
+impl<F: Clone, Request, Response, State> Clone for ServiceFn<F, Request, Response, State> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            _p: PhantomData,
+        }
+    }
+}
+
+impl<Request, Response, F, Fut, S> Service<Request, S> for ServiceFn<F, Request, Response, S>
+where
+    F: Fn(PublicKey, Request, S) -> Fut + Clone + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<Response, ServiceError>> + Send + 'static,
+    Response: Clone + Send + Sync + 'static,
+    Request: Sync + Send + 'static,
+    S: Sync + Send + Clone + 'static,
+{
+    type Response = Response;
+
+    fn serve(
         &self,
         peer: PublicKey,
-        request: Self::Request,
-    ) -> Result<Self::Reply, ServiceError> {
-        (self.inner)(peer, request).await
+        request: Request,
+        state: S,
+    ) -> impl std::future::Future<Output = Result<Self::Response, ServiceError>> + std::marker::Send
+    {
+        (self.inner)(peer, request, state)
     }
 }
+
+// impl<F, Fut, Request, Response, State> Service<Request, State> for F
+// where
+//     F: Fn(PublicKey, Request, State) -> Fut + Clone + Send + Sync + 'static,
+//     Fut: std::future::Future<Output = Result<Response, ServiceError>> + Send + 'static,
+//     Response: Clone + Send + Sync + 'static,
+//     Request: Sync + Send + 'static,
+//     State: Sync + Send + Clone + 'static,
+// {
+//     type Response = Response;
+// }
+
+// pub trait DynService: Send + Sync + std::fmt::Debug + 'static {
+//     type Request;
+//     type Reply;
+//     type State;
+//     fn serve(
+//         &self,
+//         peer: PublicKey,
+//         request: Self::Request,
+//         state: Self::State,
+//     ) -> Pin<Box<dyn Future<Output = Result<Self::Reply, ServiceError>> + std::marker::Send + '_>>;
+// }

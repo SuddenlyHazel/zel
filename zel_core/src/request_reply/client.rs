@@ -10,7 +10,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-use crate::{ServiceError, request_reply::TxRx};
+use crate::request_reply::{ServiceError, TxRx};
 
 pub struct Client<Req, Reply> {
     _req: PhantomData<Req>,
