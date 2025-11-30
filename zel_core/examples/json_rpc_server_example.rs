@@ -6,7 +6,6 @@
 //! - Registering with Iroh endpoint
 //! - Running alongside existing protocols
 
-use futures::lock;
 use jsonrpsee::core::client::ClientT;
 use jsonrpsee::rpc_params;
 use std::collections::BTreeMap;
