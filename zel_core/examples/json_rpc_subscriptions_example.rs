@@ -13,7 +13,7 @@ use jsonrpsee::core::client::SubscriptionClientT;
 use jsonrpsee::rpc_params;
 use std::time::Duration;
 use zel_core::IrohBundle;
-use zel_core::request_reply::json_rpc::{RpcModule, ServerBuilder, build_client};
+use zel_core::request_reply::json_rpc::{ConnectionExt, RpcModule, ServerBuilder, build_client};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -60,6 +60,14 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
+    let client_bundle_two = IrohBundle::builder(None).await?.finish().await;
+    let client_two = build_client(
+        &client_bundle_two.endpoint,
+        server_bundle.endpoint.id(),
+        b"jsonrpc-sub/1",
+    )
+    .await?;
+
     println!("✓ Client connected to server\n");
     println!("════════════════════════════════════════");
     println!("  Demonstrating Subscriptions");
@@ -84,8 +92,49 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Demo 2: Ticker Subscription
-    println!("📈 Demo 2: Stock Ticker Subscription");
+    // Demo 2: Two Clients, Same Subscription
+    println!("👥 Demo 2: Two Clients Subscribe to Counter");
+    println!("   Both clients subscribe to counter simultaneously...\n");
+    println!("   Note: Each gets their OWN independent counter!\n");
+
+    let mut client1_sub: jsonrpsee::core::client::Subscription<u64> = client
+        .subscribe("subscribe_counter", rpc_params![400], "unsubscribe_counter")
+        .await?;
+
+    let mut client2_sub: jsonrpsee::core::client::Subscription<u64> = client_two
+        .subscribe("subscribe_counter", rpc_params![400], "unsubscribe_counter")
+        .await?;
+
+    println!("   Receiving from both clients:");
+    for _ in 0..8 {
+        tokio::select! {
+            Some(result) = client1_sub.next() => {
+                if let Ok(count) = result {
+                    println!("   ├─ [CLIENT 1] Counter: {}", count);
+                }
+            }
+
+            Some(result) = client2_sub.next() => {
+                if let Ok(count) = result {
+                    println!("   ├─ [CLIENT 2] Counter: {}", count);
+                }
+            }
+
+            _ = tokio::time::sleep(Duration::from_secs(4)) => {
+                println!("   └─ Timeout reached");
+                break;
+            }
+        }
+    }
+
+    drop(client1_sub);
+    drop(client2_sub);
+    println!("   └─ Both clients unsubscribed\n");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Demo 3: Ticker Subscription
+    println!("📈 Demo 3: Stock Ticker Subscription");
     println!("   Subscribing to AAPL ticker...\n");
 
     let mut ticker_sub: jsonrpsee::core::client::Subscription<serde_json::Value> = client
@@ -113,8 +162,8 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Demo 3: Multiple Concurrent Subscriptions
-    println!("🔀 Demo 3: Multiple Concurrent Subscriptions");
+    // Demo 4: Multiple Concurrent Subscriptions
+    println!("🔀 Demo 4: Multiple Concurrent Subscriptions (Same Client)");
     println!("   Subscribing to both counter and events...\n");
 
     let mut counter_sub: jsonrpsee::core::client::Subscription<u64> = client
@@ -153,7 +202,7 @@ async fn main() -> anyhow::Result<()> {
 
     drop(counter_sub);
     drop(events_sub);
-    println!("   └─ All subscriptions closed\n");
+    println!("   └─ Multiple subscriptions closed\n");
 
     println!("════════════════════════════════════════");
     println!("  Subscription Demo Complete");
@@ -177,13 +226,18 @@ fn build_subscription_module() -> anyhow::Result<RpcModule<()>> {
         "subscribe_counter",
         "counter",
         "unsubscribe_counter",
-        |params, pending, _, _| async move {
+        |params, pending, _, ext| async move {
             let interval_ms: u64 = params.one().unwrap_or(1000);
             log::info!("New counter subscription ({}ms interval)", interval_ms);
-
+            let Some(connection_info) = ext.get::<ConnectionExt>() else {
+                panic!("Eeeek")
+            };
             let sink = match pending.accept().await {
                 Ok(s) => {
-                    log::info!("Counter subscription accepted successfully");
+                    log::info!(
+                        "Counter subscription accepted successfully for peer {}",
+                        connection_info.peer()
+                    );
                     s
                 }
                 Err(e) => {
@@ -199,10 +253,18 @@ fn build_subscription_module() -> anyhow::Result<RpcModule<()>> {
                 interval.tick().await;
                 counter += 1;
 
-                log::info!("Attempting to send counter update: {}", counter);
+                log::info!(
+                    "Attempting to send counter update: {} to peer {}",
+                    counter,
+                    connection_info.peer()
+                );
                 let msg = serde_json::value::to_raw_value(&counter).unwrap();
                 match sink.send(msg).await {
-                    Ok(_) => log::info!("Successfully sent counter: {}", counter),
+                    Ok(_) => log::info!(
+                        "Successfully sent counter: {} to peer {}",
+                        counter,
+                        connection_info.peer()
+                    ),
                     Err(e) => {
                         log::error!("Failed to send counter {}: {}", counter, e);
                         break;

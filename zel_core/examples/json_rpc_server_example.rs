@@ -6,12 +6,18 @@
 //! - Registering with Iroh endpoint
 //! - Running alongside existing protocols
 
+use futures::lock;
 use jsonrpsee::core::client::ClientT;
 use jsonrpsee::rpc_params;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use zel_core::IrohBundle;
 use zel_core::request_reply::json_rpc::RpcError;
 use zel_core::request_reply::json_rpc::{RpcModule, ServerBuilder, build_client};
+
+type SomeCtx = Arc<Mutex<BTreeMap<String, String>>>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,8 +30,9 @@ async fn main() -> anyhow::Result<()> {
     println!("JSON-RPC Server Example");
     println!("======================\n");
 
+    let ctx = Arc::new(Mutex::new(BTreeMap::new()));
     // Step 1: Build RPC module with methods
-    let rpc_module = build_rpc_module()?;
+    let rpc_module = build_rpc_module(ctx.clone())?;
     println!(
         "✓ RPC module built with {} methods",
         rpc_module.method_names().count()
@@ -46,18 +53,6 @@ async fn main() -> anyhow::Result<()> {
         .finish()
         .await;
 
-    println!("✓ Iroh endpoint created and listening");
-    println!("\nServer Details:");
-    println!("  ALPN: jsonrpc/1");
-    println!("  Max request size: 5 MB");
-    println!("  Max response size: 10 MB");
-    println!("\nServer is running! Press Ctrl+C to stop.\n");
-
-    // Optional: Print how clients can connect
-    println!("Clients can connect using:");
-    println!("  let client = build_client(&endpoint, server_peer, b\"jsonrpc/1\").await?;");
-    println!("  let result: String = client.request(\"say_hello\", rpc_params![]).await?;\n");
-
     tokio::time::sleep(Duration::from_secs(3)).await;
     let client_bundle = IrohBundle::builder(None).await?.finish().await;
 
@@ -76,7 +71,10 @@ async fn main() -> anyhow::Result<()> {
 
     let result: String = client.request("async_operation", rpc_params![1000]).await?;
     println!("server should have waited atleast 1000ms.. Did it? time_ms {result}");
-
+    {
+        let locked = ctx.lock().await;
+        println!("key sleep should be 1000ms {:?}", locked.get("sleep"));
+    }
     let result = client
         .request::<f64, _>("divide", rpc_params![100.0, 0.0])
         .await;
@@ -93,8 +91,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Build an RPC module with example methods
-fn build_rpc_module() -> anyhow::Result<RpcModule<()>> {
-    let mut module = RpcModule::new(());
+fn build_rpc_module(ctx: SomeCtx) -> anyhow::Result<RpcModule<SomeCtx>> {
+    let mut module = RpcModule::new(ctx);
 
     // Simple method: say_hello
     module.register_method("say_hello", |_, _, _| {
@@ -117,10 +115,11 @@ fn build_rpc_module() -> anyhow::Result<RpcModule<()>> {
     })?;
 
     // Async method example
-    module.register_async_method("async_operation", |params, _, _| async move {
+    module.register_async_method("async_operation", |params, ctx, _| async move {
         let delay_ms: u64 = params.one().unwrap_or(100);
         log::info!("async_operation called with {}ms delay", delay_ms);
-
+        let mut locked = ctx.lock().await;
+        locked.insert("sleep".into(), format!("{delay_ms}"));
         // Simulate async work
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 

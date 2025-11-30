@@ -4,9 +4,11 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use jsonrpsee::core::client::{ReceivedMessage, TransportReceiverT, TransportSenderT};
 use jsonrpsee::core::server::Methods;
+use log::warn;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+use crate::request_reply::json_rpc::ConnectionExt;
 use crate::request_reply::json_rpc::errors::{BuildError, IrohTransportError};
 use crate::request_reply::json_rpc::transport::{
     DEFAULT_MAX_REQUEST_SIZE, DEFAULT_MAX_RESPONSE_SIZE, IrohSender, accept_connection,
@@ -163,11 +165,11 @@ fn extract_subscription_id(response: &serde_json::value::RawValue) -> String {
 /// Handle a single JSON-RPC connection with subscription support
 ///
 /// This function processes requests from a client in a loop until the connection
-/// closes or an error occurs. It now handles subscriptions by spawning forwarder
-/// tasks for each subscription.
+/// closes or an error occurs. Subscriptions are handled by spawning a forwarder
+/// task for each subscription.
 async fn handle_jsonrpc_connection(
     connection: Connection,
-    methods: Methods,
+    mut methods: Methods,
     max_request_size: usize,
     max_response_size: usize,
 ) -> Result<(), IrohTransportError> {
@@ -179,6 +181,16 @@ async fn handle_jsonrpc_connection(
     let mut subscription_tasks = JoinSet::new();
     const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 100;
 
+    if let Some(existing) = methods
+        .extensions_mut()
+        .insert(ConnectionExt::new(connection.remote_id()))
+    {
+        let existing = existing.peer();
+        warn!(
+            "methods extention already contained peer: {existing} for ConnectionExt peer: {}",
+            connection.remote_id()
+        )
+    }
     // Process requests in a loop
     loop {
         tokio::select! {
@@ -203,10 +215,6 @@ async fn handle_jsonrpc_connection(
                 // Process request with jsonrpsee
                 let response = match methods.raw_json_request(&request, 1024).await {
                     Ok((response, rx)) => {
-                        // Check if this is a subscription (rx channel is non-empty/active)
-                        // The rx is an mpsc::Receiver, we need to check if it will receive messages
-                        // For now, we'll spawn the forwarder task unconditionally if we have a receiver
-
                         // Check subscription limit first
                         if subscription_tasks.len() >= MAX_SUBSCRIPTIONS_PER_CONNECTION {
                             log::error!(
@@ -260,7 +268,7 @@ async fn handle_jsonrpc_connection(
                     }
                     Ok(Err(e)) => {
                         log::error!("Subscription task failed: {e}");
-                        // Close entire connection on subscription error (Phase 1 approach)
+                        // Close entire connection on subscription error
                         return Err(e);
                     }
                     Err(e) => {
@@ -350,7 +358,7 @@ impl ServerBuilder {
     /// # Returns
     ///
     /// A [`JsonRpcHandler`] ready to be registered with an Iroh endpoint
-    pub fn build(self, module: RpcModule<()>) -> Result<JsonRpcHandler, BuildError> {
+    pub fn build<T>(self, module: RpcModule<T>) -> Result<JsonRpcHandler, BuildError> {
         Ok(JsonRpcHandler::with_limits(
             module.into(),
             self.max_request_size,

@@ -22,11 +22,13 @@
 
 pub mod client;
 pub mod errors;
+pub mod extensions;
 pub mod server;
 pub mod transport;
 
 pub use client::{IrohClientBuilder, build_client};
 pub use errors::{BuildError, IrohTransportError};
+pub use extensions::ConnectionExt;
 pub use server::{JsonRpcHandler, RpcModule, ServerBuilder};
 pub use transport::{
     DEFAULT_MAX_REQUEST_SIZE, DEFAULT_MAX_RESPONSE_SIZE, IrohReceiver, IrohSender,
