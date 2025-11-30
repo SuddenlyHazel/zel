@@ -1,6 +1,6 @@
 pub mod client;
-pub mod server;
 pub mod json_rpc;
+pub mod server;
 
 pub use client::*;
 pub use server::*;

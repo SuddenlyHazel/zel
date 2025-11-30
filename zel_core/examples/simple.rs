@@ -20,7 +20,7 @@ mod request {
 
 mod response {
     use super::*;
-    
+
     #[derive(Debug, Serialize, Deserialize)]
     struct RespHello(String);
 
