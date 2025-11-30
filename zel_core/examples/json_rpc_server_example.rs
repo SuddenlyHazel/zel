@@ -8,11 +8,10 @@
 
 use jsonrpsee::core::client::ClientT;
 use jsonrpsee::rpc_params;
-use jsonrpsee::types::ErrorObjectOwned;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use zel_core::IrohBundle;
 use zel_core::request_reply::json_rpc::RpcError;
-use zel_core::request_reply::json_rpc::{JsonRpcHandler, RpcModule, ServerBuilder, build_client};
+use zel_core::request_reply::json_rpc::{RpcModule, ServerBuilder, build_client};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

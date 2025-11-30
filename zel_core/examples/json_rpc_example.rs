@@ -2,9 +2,7 @@
 //!
 //! This example shows how to use the jsonrpsee client with Iroh transport.
 
-use std::time::Duration;
 use zel_core::IrohBundle;
-use zel_core::request_reply::json_rpc::{ClientT, IrohClientBuilder, build_client};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

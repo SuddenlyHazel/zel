@@ -4,10 +4,12 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use jsonrpsee::core::client::{ReceivedMessage, TransportReceiverT, TransportSenderT};
 use jsonrpsee::core::server::Methods;
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 use crate::request_reply::json_rpc::errors::{BuildError, IrohTransportError};
 use crate::request_reply::json_rpc::transport::{
-    DEFAULT_MAX_REQUEST_SIZE, DEFAULT_MAX_RESPONSE_SIZE, accept_connection,
+    DEFAULT_MAX_REQUEST_SIZE, DEFAULT_MAX_RESPONSE_SIZE, IrohSender, accept_connection,
 };
 
 // Make RpcModule public for server building
@@ -113,10 +115,56 @@ impl ProtocolHandler for JsonRpcHandler {
     }
 }
 
-/// Handle a single JSON-RPC connection
+/// Forward subscription notifications from jsonrpsee to the client
+///
+/// This task listens on the subscription receiver and forwards each
+/// notification to the client through the Iroh transport.
+async fn forward_subscription_notifications(
+    mut rx: mpsc::Receiver<Box<serde_json::value::RawValue>>,
+    mut sender: IrohSender,
+    sub_id: String,
+) -> Result<(), IrohTransportError> {
+    log::debug!("Subscription forwarder started for {}", sub_id);
+
+    while let Some(notification) = rx.recv().await {
+        // Convert Box<RawValue> to String
+        let notification_str = notification.get().to_string();
+        log::trace!(
+            "Forwarding subscription notification for {}: {}",
+            sub_id,
+            notification_str
+        );
+
+        if let Err(e) = sender.send(notification_str).await {
+            log::error!(
+                "Failed to send subscription notification for {}: {}",
+                sub_id,
+                e
+            );
+            return Err(e);
+        }
+    }
+
+    log::debug!("Subscription forwarder completed for {}", sub_id);
+    Ok(())
+}
+
+/// Extract subscription ID from response for logging
+fn extract_subscription_id(response: &serde_json::value::RawValue) -> String {
+    serde_json::from_str::<serde_json::Value>(response.get())
+        .ok()
+        .and_then(|v| {
+            v.get("result")
+                .and_then(|r| r.as_str().map(|s| s.to_string()))
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Handle a single JSON-RPC connection with subscription support
 ///
 /// This function processes requests from a client in a loop until the connection
-/// closes or an error occurs.
+/// closes or an error occurs. It now handles subscriptions by spawning forwarder
+/// tasks for each subscription.
 async fn handle_jsonrpc_connection(
     connection: Connection,
     methods: Methods,
@@ -127,46 +175,108 @@ async fn handle_jsonrpc_connection(
     let (mut sender, mut receiver) =
         accept_connection(&connection, max_request_size, max_response_size).await?;
 
+    // Track active subscription forwarder tasks
+    let mut subscription_tasks = JoinSet::new();
+    const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 100;
+
     // Process requests in a loop
     loop {
-        // Receive request
-        let request = match receiver.receive().await {
-            Ok(ReceivedMessage::Text(msg)) => msg,
-            Ok(ReceivedMessage::Bytes(_)) => {
-                log::warn!("Received unexpected binary message, ignoring");
-                continue;
-            }
-            Ok(ReceivedMessage::Pong) => {
-                log::debug!("Received pong");
-                continue;
-            }
-            Err(e) => {
-                log::debug!("Connection closed or error receiving message: {e}");
-                break;
-            }
-        };
+        tokio::select! {
+            // Handle incoming requests
+            request_result = receiver.receive() => {
+                let request = match request_result {
+                    Ok(ReceivedMessage::Text(msg)) => msg,
+                    Ok(ReceivedMessage::Bytes(_)) => {
+                        log::warn!("Received unexpected binary message, ignoring");
+                        continue;
+                    }
+                    Ok(ReceivedMessage::Pong) => {
+                        log::debug!("Received pong");
+                        continue;
+                    }
+                    Err(e) => {
+                        log::debug!("Connection closed or error receiving message: {e}");
+                        break;
+                    }
+                };
 
-        // Process request with jsonrpsee
-        let response = match methods.raw_json_request(&request, 1024).await {
-            Ok((response, _rx)) => {
-                // Convert Box<RawValue> to String
-                response.get().to_string()
-            }
-            Err(e) => {
-                log::error!("Failed to process request: {e}");
-                // Return error response
-                format!(
-                    r#"{{"jsonrpc":"2.0","id":null,"error":{{"code":-32603,"message":"Internal error"}}}}"#
-                )
-            }
-        };
+                // Process request with jsonrpsee
+                let response = match methods.raw_json_request(&request, 1024).await {
+                    Ok((response, rx)) => {
+                        // Check if this is a subscription (rx channel is non-empty/active)
+                        // The rx is an mpsc::Receiver, we need to check if it will receive messages
+                        // For now, we'll spawn the forwarder task unconditionally if we have a receiver
 
-        // Send response
-        if let Err(e) = sender.send(response).await {
-            log::error!("Failed to send response: {e}");
-            break;
+                        // Check subscription limit first
+                        if subscription_tasks.len() >= MAX_SUBSCRIPTIONS_PER_CONNECTION {
+                            log::error!(
+                                "Subscription limit reached ({} active subscriptions)",
+                                MAX_SUBSCRIPTIONS_PER_CONNECTION
+                            );
+                            // Send error response
+                            format!(
+                                r#"{{"jsonrpc":"2.0","id":null,"error":{{"code":-32000,"message":"Too many active subscriptions"}}}}"#
+                            )
+                        } else {
+                            // Extract subscription ID for logging
+                            let sub_id = extract_subscription_id(&response);
+                            log::info!("New subscription created: {}", sub_id);
+
+                            // Clone sender for the forwarder task
+                            let sender_clone = sender.clone();
+                            let sub_id_clone = sub_id.clone();
+
+                            // ALWAYS spawn forwarder task when we have an rx channel
+                            // The presence of rx indicates this is a subscription
+                            subscription_tasks.spawn(async move {
+                                forward_subscription_notifications(rx, sender_clone, sub_id_clone).await
+                            });
+
+                            // Send initial response (subscription ID)
+                            response.get().to_string()
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Failed to process request: {e}");
+                        // Return error response
+                        format!(
+                            r#"{{"jsonrpc":"2.0","id":null,"error":{{"code":-32603,"message":"Internal error"}}}}"#
+                        )
+                    }
+                };
+
+                // Send response
+                if let Err(e) = sender.send(response).await {
+                    log::error!("Failed to send response: {e}");
+                    break;
+                }
+            }
+
+            // Check for completed subscription tasks
+            Some(task_result) = subscription_tasks.join_next(), if !subscription_tasks.is_empty() => {
+                match task_result {
+                    Ok(Ok(())) => {
+                        log::debug!("Subscription task completed successfully");
+                    }
+                    Ok(Err(e)) => {
+                        log::error!("Subscription task failed: {e}");
+                        // Close entire connection on subscription error (Phase 1 approach)
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        log::error!("Subscription task panicked: {e}");
+                    }
+                }
+            }
         }
     }
+
+    // Cleanup: abort all remaining subscription tasks
+    log::debug!(
+        "Connection closing, aborting {} subscription tasks",
+        subscription_tasks.len()
+    );
+    subscription_tasks.abort_all();
 
     Ok(())
 }

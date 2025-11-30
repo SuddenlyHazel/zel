@@ -3,12 +3,14 @@
 //! This module provides COBS-framed transport for JSON-RPC messages over Iroh streams.
 
 use std::io;
+use std::sync::Arc;
 
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, PublicKey};
 use jsonrpsee::core::client::{ReceivedMessage, TransportReceiverT, TransportSenderT};
 use log::error;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 
 use crate::request_reply::json_rpc::errors::{BuildError, IrohTransportError};
 
@@ -20,18 +22,32 @@ use crate::request_reply::json_rpc::errors::{BuildError, IrohTransportError};
 ///
 /// Implements [`TransportSenderT`] to send JSON-RPC messages over Iroh.
 /// Uses COBS (Consistent Overhead Byte Stuffing) for message framing.
+///
+/// This type is cloneable to support subscription forwarding where multiple
+/// tasks need to send messages on the same underlying stream.
 pub struct IrohSender {
-    send: SendStream,
+    send: Arc<Mutex<SendStream>>,
     max_request_size: usize,
-    buffer: Vec<u8>,
+    buffer: Arc<Mutex<Vec<u8>>>,
 }
 
 impl IrohSender {
     pub(crate) fn new(send: SendStream, max_request_size: usize) -> Self {
         Self {
-            send,
+            send: Arc::new(Mutex::new(send)),
             max_request_size,
-            buffer: Vec::with_capacity(max_request_size),
+            buffer: Arc::new(Mutex::new(Vec::with_capacity(max_request_size))),
+        }
+    }
+}
+
+impl Clone for IrohSender {
+    fn clone(&self) -> Self {
+        Self {
+            send: Arc::clone(&self.send),
+            max_request_size: self.max_request_size,
+            // Each clone gets its own buffer to avoid contention
+            buffer: Arc::new(Mutex::new(Vec::with_capacity(self.max_request_size))),
         }
     }
 }
@@ -52,27 +68,29 @@ impl TransportSenderT for IrohSender {
             });
         }
 
+        // Acquire buffer lock
+        let mut buffer = self.buffer.lock().await;
+
         // COBS encode with 0x00 delimiter
-        self.buffer.clear();
-        self.buffer.resize(msg.len() + (msg.len() / 254) + 2, 0);
-        match cobs::try_encode(msg.as_bytes(), &mut self.buffer) {
+        buffer.clear();
+        buffer.resize(msg.len() + (msg.len() / 254) + 2, 0);
+        match cobs::try_encode(msg.as_bytes(), &mut buffer) {
             Ok(encoded_len) => {
-                self.buffer.truncate(encoded_len);
+                buffer.truncate(encoded_len);
             }
             Err(e) => {
                 error!("dest buffer too small {e}");
                 return Err(IrohTransportError::CobsEncode(e.to_string()));
             }
         }
-        self.buffer.push(0x00); // Frame delimiter
+        buffer.push(0x00); // Frame delimiter
 
-        // Write to stream
-        self.send
-            .write_all(&self.buffer)
+        // Acquire stream lock and write
+        let mut send = self.send.lock().await;
+        send.write_all(&buffer)
             .await
             .map_err(|e| IrohTransportError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
-        self.send
-            .flush()
+        send.flush()
             .await
             .map_err(|e| IrohTransportError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
 
@@ -85,7 +103,8 @@ impl TransportSenderT for IrohSender {
     }
 
     async fn close(&mut self) -> Result<(), Self::Error> {
-        self.send.finish().map_err(|e| {
+        let mut send = self.send.lock().await;
+        send.finish().map_err(|e| {
             IrohTransportError::Io(io::Error::new(
                 io::ErrorKind::Other,
                 format!("Failed to finish stream: {}", e),

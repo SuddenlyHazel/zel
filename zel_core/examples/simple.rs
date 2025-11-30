@@ -1,5 +1,4 @@
 use derive_more::TryInto;
-use iroh::PublicKey;
 use serde::{Deserialize, Serialize};
 
 mod request {
