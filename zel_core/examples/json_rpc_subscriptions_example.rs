@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
             println!("   ├─ Counter: {} (update #{})", count, i + 1);
         }
     }
-    drop(counter_sub);
+    let _ = counter_sub.unsubscribe().await;
     println!("   └─ Unsubscribed from counter\n");
 
     tokio::time::sleep(Duration::from_millis(500)).await;

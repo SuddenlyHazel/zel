@@ -272,10 +272,97 @@ impl IrohTransportBuilder {
 // Server Support
 // ============================================================================
 
+/// Read a single COBS-framed message from an Iroh stream
+///
+/// Reads bytes until the 0x00 delimiter, then COBS-decodes the frame.
+/// Returns the raw decoded bytes without UTF-8 conversion.
+///
+/// # Arguments
+///
+/// * `recv` - The receive stream to read from
+/// * `max_size` - Maximum allowed message size in bytes
+///
+/// # Returns
+///
+/// The decoded message bytes, or an error if the message is too large or decoding fails
+pub async fn read_cobs_frame(
+    recv: &mut RecvStream,
+    max_size: usize,
+) -> Result<Vec<u8>, IrohTransportError> {
+    let mut buffer = Vec::new();
+    let mut byte = [0u8; 1];
+
+    // Read until 0x00 delimiter
+    loop {
+        recv.read_exact(&mut byte)
+            .await
+            .map_err(|e| IrohTransportError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+
+        if byte[0] == 0x00 {
+            break; // Frame complete
+        }
+
+        buffer.push(byte[0]);
+
+        if buffer.len() > max_size {
+            return Err(IrohTransportError::MessageTooLarge {
+                size: buffer.len(),
+                max: max_size,
+            });
+        }
+    }
+
+    // COBS decode
+    let mut decoded = vec![0u8; buffer.len()];
+    let len = cobs::decode(&buffer, &mut decoded).map_err(|_| IrohTransportError::CobsDecode)?;
+    decoded.truncate(len);
+
+    Ok(decoded)
+}
+
+/// Write a COBS-framed message to an Iroh stream
+///
+/// Encodes the data using COBS and writes it with a 0x00 delimiter.
+///
+/// # Arguments
+///
+/// * `send` - The send stream to write to
+/// * `data` - The data to encode and send
+///
+/// # Returns
+///
+/// Ok(()) on success, or an error if encoding or writing fails
+pub async fn write_cobs_frame(
+    send: &mut SendStream,
+    data: &[u8],
+) -> Result<(), IrohTransportError> {
+    // Allocate buffer for COBS encoding
+    let mut buffer = vec![0u8; data.len() + (data.len() / 254) + 2];
+
+    let encoded_len = cobs::try_encode(data, &mut buffer)
+        .map_err(|e| IrohTransportError::CobsEncode(e.to_string()))?;
+
+    buffer.truncate(encoded_len);
+    buffer.push(0x00); // Frame delimiter
+
+    send.write_all(&buffer)
+        .await
+        .map_err(|e| IrohTransportError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+
+    send.flush()
+        .await
+        .map_err(|e| IrohTransportError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+
+    Ok(())
+}
+
 /// Accept an incoming connection and create transports for server-side handling
 ///
 /// This is the server-side equivalent of [`IrohTransportBuilder::build`].
 /// It accepts a bidirectional stream from the client and creates sender/receiver.
+///
+/// **Note**: This function is primarily for CLIENT compatibility. Server code should
+/// use `read_cobs_frame()` and `write_cobs_frame()` directly for better control.
 ///
 /// # Arguments
 ///

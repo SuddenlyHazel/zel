@@ -23,8 +23,10 @@
 pub mod client;
 pub mod errors;
 pub mod extensions;
+pub mod iroh_service;
 pub mod server;
 pub mod transport;
+pub mod utils;
 
 pub use client::{IrohClientBuilder, build_client};
 pub use errors::{BuildError, IrohTransportError};
