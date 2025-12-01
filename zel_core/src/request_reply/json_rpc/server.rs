@@ -180,10 +180,9 @@ async fn handle_jsonrpc_connection(
     // Track active subscription forwarder tasks
     let mut subscription_tasks = JoinSet::new();
     const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 100;
-
     if let Some(existing) = methods
         .extensions_mut()
-        .insert(ConnectionExt::new(connection.remote_id()))
+        .insert(ConnectionExt::new(connection.clone()))
     {
         let existing = existing.peer();
         warn!(

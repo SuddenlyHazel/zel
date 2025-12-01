@@ -118,6 +118,7 @@ pub struct IrohBundle {
 
 impl IrohBundle {
     /// Create a new builder for configuring an [`IrohBundle`].
+    /// By default this configures the endpoint with n0 DNS Discovery.
     ///
     /// # Arguments
     /// * `secret_key` - Optional secret key for the endpoint. If `None`, a new key is generated.
