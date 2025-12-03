@@ -3,7 +3,7 @@ use futures::{SinkExt, StreamExt};
 use std::time::Duration;
 use zel_core::IrohBundle;
 use zel_core::protocol::{
-    Body, Request, ResourceError, Response, RpcServerBuilder, SubscriptionMsg,
+    Body, ResourceError, Response, RpcServerBuilder, SubscriptionMsg,
     client::{ClientError, RpcClient},
 };
 

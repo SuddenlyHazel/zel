@@ -2,8 +2,8 @@ use anyhow::Context;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use iroh::{endpoint::Connection, protocol::ProtocolHandler};
-use log::warn;
-use tokio_util::codec::{Framed, FramedParts, FramedRead, FramedWrite, LengthDelimitedCodec};
+use log::{trace, warn};
+use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 use crate::protocol::{
     Request, ResourceError, ResourceResponse, Response, ServiceMap, SubscriptionMsg,
@@ -16,8 +16,7 @@ impl ProtocolHandler for super::RpcServer<'static> {
         &self,
         connection: iroh::endpoint::Connection,
     ) -> impl Future<Output = Result<(), iroh::protocol::AcceptError>> + Send {
-        let remote_id = connection.remote_id();
-
+        trace!("incoming connection from {}", connection.remote_id());
         let services = self.services.clone();
         async move {
             tokio::spawn(async move {
@@ -44,7 +43,7 @@ async fn connection_handler<'a>(
             Ok(req) => serde_json::from_slice::<Request>(&req),
             Err(err) => {
                 log::error!(
-                    "Failed to read frame from peer {} error: {err}",
+                    "Failed to read frame from peer {}: aborting connection. error: {err}",
                     connection.remote_id()
                 );
                 break;
@@ -52,7 +51,10 @@ async fn connection_handler<'a>(
         };
 
         let Ok(request) = req_maybe else {
-            log::error!("Peer {} sent a malformed request", connection.remote_id());
+            log::error!(
+                "Peer {} sent a malformed request aborting connection",
+                connection.remote_id()
+            );
             break;
         };
 
@@ -91,8 +93,9 @@ async fn connection_handler<'a>(
                     Ok(bytes) => bytes,
                     Err(e) => {
                         let error = ResourceError::SerializationError(e.to_string());
-                        serde_json::to_vec(&Err::<Response, _>(error))
-                            .unwrap_or_else(|_| b"{}".to_vec())
+                        serde_json::to_vec(&Err::<Response, _>(error)).context(
+                            "failed to serialize error response something really bad is happening",
+                        )?
                     }
                 };
 
@@ -123,7 +126,8 @@ async fn connection_handler<'a>(
                     service: request.service.clone(),
                     resource: request.resource.clone(),
                 };
-                let ack = serde_json::to_vec(&ack).unwrap_or_else(|_| b"{}".to_vec());
+                let ack = serde_json::to_vec(&ack)
+                    .context("failed to serialize ack message something really bad is happening")?;
                 if let Err(e) = sub_tx.send(ack.into()).await {
                     log::error!(
                         "attempted to send subscription ack to peer {} but failed {e}",
@@ -139,8 +143,8 @@ async fn connection_handler<'a>(
 
                 // Send success response on bidi stream
                 let response: Result<Response, ResourceError> = Ok(Response { data: Bytes::new() });
-                let response_bytes =
-                    serde_json::to_vec(&response).unwrap_or_else(|_| b"{}".to_vec());
+                let response_bytes = serde_json::to_vec(&response)
+                    .context("failed to serialize response something really bad is happening")?;
                 if let Err(e) = tx.send(response_bytes.into()).await {
                     log::error!(
                         "failed to send subscription response to peer {}: {e}",
