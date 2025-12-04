@@ -51,6 +51,13 @@ pub struct SubscriptionAttr {
     pub item: Option<syn::Type>,
 }
 
+/// Notification attribute: #[notification(name = "...", item = "Type")]
+#[derive(Debug, Clone)]
+pub struct NotificationAttr {
+    pub name: String,
+    pub item: Option<syn::Type>,
+}
+
 /// Stream attribute: #[stream(name = "...")]
 #[derive(Debug, Clone)]
 pub struct StreamAttr {
@@ -74,6 +81,17 @@ pub fn parse_subscription_attr(attrs: &[Attribute]) -> syn::Result<Option<Subscr
         if attr.path().is_ident("subscription") {
             return attr
                 .parse_args::<SubscriptionAttrParser>()
+                .map(|p| Some(p.into()));
+        }
+    }
+    Ok(None)
+}
+
+pub fn parse_notification_attr(attrs: &[Attribute]) -> syn::Result<Option<NotificationAttr>> {
+    for attr in attrs {
+        if attr.path().is_ident("notification") {
+            return attr
+                .parse_args::<NotificationAttrParser>()
                 .map(|p| Some(p.into()));
         }
     }
@@ -165,6 +183,51 @@ impl Parse for SubscriptionAttrParser {
 impl From<SubscriptionAttrParser> for SubscriptionAttr {
     fn from(p: SubscriptionAttrParser) -> Self {
         SubscriptionAttr {
+            name: p.name,
+            item: p.item,
+        }
+    }
+}
+
+struct NotificationAttrParser {
+    name: String,
+    item: Option<syn::Type>,
+}
+
+impl Parse for NotificationAttrParser {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let mut name = None;
+        let mut item = None;
+
+        while !input.is_empty() {
+            let key: syn::Ident = input.parse()?;
+            input.parse::<Token![=]>()?;
+
+            if key == "name" {
+                let value: Lit = input.parse()?;
+                if let Lit::Str(s) = value {
+                    name = Some(s.value());
+                }
+            } else if key == "item" {
+                let value: Lit = input.parse()?;
+                if let Lit::Str(s) = value {
+                    item = Some(syn::parse_str::<syn::Type>(&s.value())?);
+                }
+            }
+
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+        }
+
+        name.ok_or_else(|| input.error("Missing 'name' attribute"))
+            .map(|name| NotificationAttrParser { name, item })
+    }
+}
+
+impl From<NotificationAttrParser> for NotificationAttr {
+    fn from(p: NotificationAttrParser) -> Self {
+        NotificationAttr {
             name: p.name,
             item: p.item,
         }

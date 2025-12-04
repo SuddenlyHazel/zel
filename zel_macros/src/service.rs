@@ -1,6 +1,6 @@
 use crate::attributes::{
-    parse_method_attr, parse_stream_attr, parse_subscription_attr, MethodAttr, ServiceAttr,
-    StreamAttr, SubscriptionAttr,
+    parse_method_attr, parse_notification_attr, parse_stream_attr, parse_subscription_attr,
+    MethodAttr, NotificationAttr, ServiceAttr, StreamAttr, SubscriptionAttr,
 };
 use crate::helpers::{extract_params, extract_return_type, is_async, ParamInfo};
 use syn::{ItemTrait, TraitItem, TraitItemFn};
@@ -11,6 +11,7 @@ pub struct ServiceDescription {
     pub trait_ident: syn::Ident,
     pub methods: Vec<MethodDescription>,
     pub subscriptions: Vec<SubscriptionDescription>,
+    pub notifications: Vec<NotificationDescription>,
     pub streams: Vec<StreamDescription>,
 }
 
@@ -31,6 +32,14 @@ pub struct SubscriptionDescription {
 }
 
 #[derive(Debug, Clone)]
+pub struct NotificationDescription {
+    pub rpc_name: String,
+    pub signature: TraitItemFn,
+    pub params: Vec<ParamInfo>,
+    pub item_type: Option<syn::Type>,
+}
+
+#[derive(Debug, Clone)]
 pub struct StreamDescription {
     pub rpc_name: String,
     pub signature: TraitItemFn,
@@ -41,6 +50,7 @@ impl ServiceDescription {
     pub fn from_item(attr: ServiceAttr, trait_def: ItemTrait) -> syn::Result<Self> {
         let mut methods = Vec::new();
         let mut subscriptions = Vec::new();
+        let mut notifications = Vec::new();
         let mut streams = Vec::new();
 
         // Validate trait has no associated types or constants
@@ -71,26 +81,32 @@ impl ServiceDescription {
                 ));
             };
 
-            // Check for #[method], #[subscription], or #[stream] attribute
+            // Check for #[method], #[subscription], #[notification], or #[stream] attribute
             if let Some(method_attr) = parse_method_attr(&method.attrs)? {
                 methods.push(MethodDescription::from_trait_fn(method_attr, method)?);
             } else if let Some(sub_attr) = parse_subscription_attr(&method.attrs)? {
                 subscriptions.push(SubscriptionDescription::from_trait_fn(sub_attr, method)?);
+            } else if let Some(notif_attr) = parse_notification_attr(&method.attrs)? {
+                notifications.push(NotificationDescription::from_trait_fn(notif_attr, method)?);
             } else if let Some(stream_attr) = parse_stream_attr(&method.attrs)? {
                 streams.push(StreamDescription::from_trait_fn(stream_attr, method)?);
             } else {
                 return Err(syn::Error::new_spanned(
                     method,
-                    "Method must have #[method], #[subscription], or #[stream] attribute",
+                    "Method must have #[method], #[subscription], #[notification], or #[stream] attribute",
                 ));
             }
         }
 
-        // Ensure at least one method, subscription, or stream
-        if methods.is_empty() && subscriptions.is_empty() && streams.is_empty() {
+        // Ensure at least one method, subscription, notification, or stream
+        if methods.is_empty()
+            && subscriptions.is_empty()
+            && notifications.is_empty()
+            && streams.is_empty()
+        {
             return Err(syn::Error::new_spanned(
                 trait_def.ident,
-                "Service trait must have at least one method, subscription, or stream",
+                "Service trait must have at least one method, subscription, notification, or stream",
             ));
         }
 
@@ -99,6 +115,7 @@ impl ServiceDescription {
             trait_ident: trait_def.ident,
             methods,
             subscriptions,
+            notifications,
             streams,
         })
     }
@@ -165,6 +182,35 @@ impl SubscriptionDescription {
     }
 }
 
+impl NotificationDescription {
+    fn from_trait_fn(attr: NotificationAttr, mut method: TraitItemFn) -> syn::Result<Self> {
+        // Validate method is async
+        if !is_async(&method.sig) {
+            return Err(syn::Error::new_spanned(
+                &method.sig,
+                "Notification methods must be async",
+            ));
+        }
+
+        // Extract parameters
+        let params = extract_params(&method.sig)?;
+
+        // Remove the attributes from the signature
+        method.attrs.retain(|attr| {
+            !attr.path().is_ident("method")
+                && !attr.path().is_ident("subscription")
+                && !attr.path().is_ident("notification")
+        });
+
+        Ok(Self {
+            rpc_name: attr.name,
+            signature: method,
+            params,
+            item_type: attr.item,
+        })
+    }
+}
+
 impl StreamDescription {
     fn from_trait_fn(attr: StreamAttr, mut method: TraitItemFn) -> syn::Result<Self> {
         // Validate method is async
@@ -182,6 +228,7 @@ impl StreamDescription {
         method.attrs.retain(|attr| {
             !attr.path().is_ident("method")
                 && !attr.path().is_ident("subscription")
+                && !attr.path().is_ident("notification")
                 && !attr.path().is_ident("stream")
         });
 

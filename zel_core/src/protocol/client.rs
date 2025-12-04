@@ -196,6 +196,101 @@ impl RpcClient {
         Ok(SubscriptionStream { inner: sub_rx })
     }
 
+    /// Start a notification stream to server (client-to-server streaming)
+    ///
+    /// This allows clients to push events to the server over time with
+    /// acknowledgment support. Each message sent receives an acknowledgment.
+    ///
+    /// # Arguments
+    /// * `service` - The service name
+    /// * `resource` - The resource name
+    /// * `params` - Optional serialized parameters
+    ///
+    /// # Returns
+    /// A `NotificationSender` for sending events to the server
+    pub async fn notify(
+        &self,
+        service: impl Into<String>,
+        resource: impl Into<String>,
+        params: Option<Bytes>,
+    ) -> Result<NotificationSender, ClientError> {
+        let service = service.into();
+        let resource = resource.into();
+
+        // Send notification request on shared bidi stream
+        let request = Request {
+            service: service.clone(),
+            resource: resource.clone(),
+            body: Body::Notify(params.unwrap_or_default()),
+        };
+
+        let request_bytes = serde_json::to_vec(&request)?;
+
+        {
+            let mut tx = self.tx.lock().await;
+            tx.send(request_bytes.into())
+                .await
+                .map_err(|e| ClientError::Connection(e.to_string()))?;
+        }
+
+        // Wait for Response (OK) on shared bidi stream
+        let response_bytes = {
+            let mut rx = self.rx.lock().await;
+            rx.next()
+                .await
+                .ok_or_else(|| ClientError::Protocol("No response received".into()))?
+                .map_err(|e| ClientError::Connection(e.to_string()))?
+        };
+
+        let response: Result<Response, ResourceError> = serde_json::from_slice(&response_bytes)?;
+        response.map_err(ClientError::Resource)?;
+
+        // Accept bidirectional stream from server
+        let (notif_tx, notif_rx) = self
+            .connection
+            .accept_bi()
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+
+        let mut notif_rx = FramedRead::new(notif_rx, LengthDelimitedCodec::new());
+        let notif_tx = FramedWrite::new(notif_tx, LengthDelimitedCodec::new());
+
+        // Receive Established message
+        let established_bytes = notif_rx
+            .next()
+            .await
+            .ok_or_else(|| ClientError::Protocol("No established message received".into()))?
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+
+        let established: crate::protocol::NotificationMsg =
+            serde_json::from_slice(&established_bytes)?;
+
+        match established {
+            crate::protocol::NotificationMsg::Established {
+                service: s,
+                resource: r,
+            } => {
+                if s != service || r != resource {
+                    return Err(ClientError::Protocol(format!(
+                        "Established message mismatch: expected {}/{}, got {}/{}",
+                        service, resource, s, r
+                    )));
+                }
+            }
+            _ => {
+                return Err(ClientError::Protocol(
+                    "Expected Established message, got something else".into(),
+                ));
+            }
+        }
+
+        // Return NotificationSender
+        Ok(NotificationSender {
+            tx: notif_tx,
+            rx: notif_rx,
+        })
+    }
+
     /// Open a raw bidirectional stream for custom protocols
     ///
     /// This allows implementing custom protocols like video/audio streaming,
@@ -293,5 +388,63 @@ impl Stream for SubscriptionStream {
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         // Iroh will close the stream automatically when dropped
+    }
+}
+
+/// Client-side notification sender (client-to-server streaming)
+pub struct NotificationSender {
+    tx: FramedWrite<iroh::endpoint::SendStream, LengthDelimitedCodec>,
+    rx: FramedRead<RecvStream, LengthDelimitedCodec>,
+}
+
+impl NotificationSender {
+    /// Send a notification message to the server and wait for acknowledgment
+    ///
+    /// This method will serialize the data, send it to the server, and wait
+    /// for an acknowledgment before returning.
+    pub async fn send<T: serde::Serialize>(&mut self, data: T) -> Result<(), ClientError> {
+        // Serialize the data
+        let data = serde_json::to_vec(&data)?;
+        let msg = crate::protocol::NotificationMsg::Data(Bytes::from(data));
+        let msg_bytes = serde_json::to_vec(&msg)?;
+
+        // Send the notification
+        self.tx
+            .send(msg_bytes.into())
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+
+        // Wait for acknowledgment
+        let ack_bytes = self
+            .rx
+            .next()
+            .await
+            .ok_or_else(|| ClientError::Protocol("No acknowledgment received".into()))?
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+
+        let ack: crate::protocol::NotificationMsg = serde_json::from_slice(&ack_bytes)?;
+
+        match ack {
+            crate::protocol::NotificationMsg::Ack => Ok(()),
+            crate::protocol::NotificationMsg::Error(e) => {
+                Err(ClientError::Protocol(format!("Server error: {}", e)))
+            }
+            _ => Err(ClientError::Protocol("Unexpected message type".into())),
+        }
+    }
+
+    /// Signal completion of the notification stream
+    ///
+    /// This sends a Completed message to the server and consumes the sender.
+    pub async fn complete(mut self) -> Result<(), ClientError> {
+        let msg = crate::protocol::NotificationMsg::Completed;
+        let msg_bytes = serde_json::to_vec(&msg)?;
+
+        self.tx
+            .send(msg_bytes.into())
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+
+        Ok(())
     }
 }
