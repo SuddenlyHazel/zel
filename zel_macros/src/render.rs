@@ -1,5 +1,6 @@
 use crate::service::{
-    MethodDescription, ServiceDescription, StreamDescription, SubscriptionDescription,
+    MethodDescription, NotificationDescription, ServiceDescription, StreamDescription,
+    SubscriptionDescription,
 };
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -7,10 +8,12 @@ use quote::quote;
 pub fn render_service(service: &ServiceDescription) -> TokenStream2 {
     let server_trait = render_server_trait(service);
     let typed_sinks = render_typed_sinks(service);
+    let typed_receivers = render_typed_receivers(service);
     let client_struct = render_client_struct(service);
 
     quote! {
         #typed_sinks
+        #typed_receivers
         #server_trait
         #client_struct
     }
@@ -76,6 +79,41 @@ fn render_server_trait(service: &ServiceDescription) -> TokenStream2 {
         })
         .collect();
 
+    // Render notification signatures with injected RequestContext and TYPED receiver parameter
+    let notifications: Vec<_> = service
+        .notifications
+        .iter()
+        .map(|n| {
+            let mut sig = n.signature.sig.clone();
+            let attrs = &n.signature.attrs;
+
+            // Generate typed receiver name
+            let method_name = &n.signature.sig.ident;
+            let receiver_type = quote::format_ident!(
+                "{}{}Receiver",
+                trait_name,
+                capitalize_first(&method_name.to_string())
+            );
+
+            // Insert RequestContext parameter as first argument (after &self)
+            let ctx_param: syn::FnArg = syn::parse_quote! {
+                ctx: zel_core::protocol::RequestContext
+            };
+            sig.inputs.insert(1, ctx_param);
+
+            // Insert TYPED receiver parameter as second argument (after &self and ctx)
+            let receiver_param: syn::FnArg = syn::parse_quote! {
+                receiver: #receiver_type
+            };
+            sig.inputs.insert(2, receiver_param);
+
+            quote! {
+                #(#attrs)*
+                #sig;
+            }
+        })
+        .collect();
+
     // Render stream signatures with injected RequestContext and raw SendStream/RecvStream
     let streams: Vec<_> = service
         .streams
@@ -117,6 +155,7 @@ fn render_server_trait(service: &ServiceDescription) -> TokenStream2 {
         pub trait #server_name: Clone + Send + Sync + 'static {
             #(#methods)*
             #(#subscriptions)*
+            #(#notifications)*
             #(#streams)*
 
             /// Convert this service implementation into a ServiceBuilder with registered resources
@@ -141,6 +180,20 @@ fn render_typed_sinks(service: &ServiceDescription) -> TokenStream2 {
 
     quote! {
         #(#typed_sinks)*
+    }
+}
+
+fn render_typed_receivers(service: &ServiceDescription) -> TokenStream2 {
+    let trait_name = &service.trait_ident;
+
+    let typed_receivers: Vec<_> = service
+        .notifications
+        .iter()
+        .map(|n| render_typed_receiver(n, trait_name))
+        .collect();
+
+    quote! {
+        #(#typed_receivers)*
     }
 }
 
@@ -175,6 +228,70 @@ fn render_typed_sink(sub: &SubscriptionDescription, trait_name: &syn::Ident) -> 
     }
 }
 
+fn render_typed_receiver(notif: &NotificationDescription, trait_name: &syn::Ident) -> TokenStream2 {
+    let method_name = &notif.signature.sig.ident;
+    let receiver_name = quote::format_ident!(
+        "{}{}Receiver",
+        trait_name,
+        capitalize_first(&method_name.to_string())
+    );
+
+    let item_type = notif
+        .item_type
+        .as_ref()
+        .map(|ty| quote! { #ty })
+        .unwrap_or_else(|| quote! { () });
+
+    quote! {
+        pub struct #receiver_name {
+            inner: tokio_util::codec::FramedRead<iroh::endpoint::RecvStream, tokio_util::codec::LengthDelimitedCodec>,
+            sink: zel_core::protocol::NotificationSink,
+        }
+
+        impl #receiver_name {
+            pub async fn next(&mut self) -> Option<Result<#item_type, zel_core::protocol::NotificationError>> {
+                use futures::StreamExt;
+
+                loop {
+                    let bytes = match self.inner.next().await {
+                        Some(Ok(b)) => b,
+                        Some(Err(e)) => return Some(Err(zel_core::protocol::NotificationError::Receive(e.to_string()))),
+                        None => return None,
+                    };
+
+                    let msg: zel_core::protocol::NotificationMsg = match serde_json::from_slice(&bytes) {
+                        Ok(m) => m,
+                        Err(e) => return Some(Err(zel_core::protocol::NotificationError::Deserialization(e.to_string()))),
+                    };
+
+                    match msg {
+                        zel_core::protocol::NotificationMsg::Data(data) => {
+                            let item: #item_type = match serde_json::from_slice(&data) {
+                                Ok(i) => i,
+                                Err(e) => return Some(Err(zel_core::protocol::NotificationError::Deserialization(e.to_string()))),
+                            };
+
+                            // Send acknowledgment
+                            if let Err(e) = self.sink.ack().await {
+                                return Some(Err(e));
+                            }
+
+                            return Some(Ok(item));
+                        }
+                        zel_core::protocol::NotificationMsg::Completed => {
+                            return None;
+                        }
+                        _ => {
+                            // Ignore other message types
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn render_into_builder_body(service: &ServiceDescription) -> TokenStream2 {
     let trait_name = &service.trait_ident;
 
@@ -188,6 +305,12 @@ fn render_into_builder_body(service: &ServiceDescription) -> TokenStream2 {
         .subscriptions
         .iter()
         .map(|s| render_subscription_registration(s, trait_name))
+        .collect();
+
+    let notification_registrations: Vec<_> = service
+        .notifications
+        .iter()
+        .map(|n| render_notification_registration(n, trait_name))
         .collect();
 
     let stream_registrations: Vec<_> = service
@@ -205,6 +328,10 @@ fn render_into_builder_body(service: &ServiceDescription) -> TokenStream2 {
 
         #(
             let service_builder = #subscription_registrations;
+        )*
+
+        #(
+            let service_builder = #notification_registrations;
         )*
 
         #(
@@ -343,6 +470,7 @@ fn render_subscription_registration(
                             zel_core::protocol::Body::Subscribe => &[] as &[u8],
                             zel_core::protocol::Body::Rpc(data) => data.as_ref(),
                             zel_core::protocol::Body::Stream(data) => data.as_ref(),
+                            zel_core::protocol::Body::Notify(data) => data.as_ref(),
                         };
 
                         // Deserialize params (if any)
@@ -354,6 +482,94 @@ fn render_subscription_registration(
 
                         // Call user's subscription method with context and typed sink
                         service.#rust_method(ctx, sink, #(#param_idents),*).await
+                            .map_err(|e| zel_core::protocol::ResourceError::CallbackError(
+                                e.to_string()
+                            ))?;
+
+                        Ok(zel_core::protocol::Response {
+                            data: bytes::Bytes::new()
+                        })
+                    })
+                }
+            }
+        )
+    }
+}
+
+fn render_notification_registration(
+    notif: &NotificationDescription,
+    trait_name: &syn::Ident,
+) -> TokenStream2 {
+    let notif_name = &notif.rpc_name;
+    let rust_method = &notif.signature.sig.ident;
+    let param_idents: Vec<_> = notif.params.iter().map(|p| &p.ident).collect();
+    let param_types: Vec<_> = notif.params.iter().map(|p| &p.ty).collect();
+
+    // Generate typed receiver name
+    let typed_receiver_name = quote::format_ident!(
+        "{}{}Receiver",
+        trait_name,
+        capitalize_first(&rust_method.to_string())
+    );
+
+    let deserialize_params = if param_idents.is_empty() {
+        quote! {
+            // No parameters
+        }
+    } else if param_idents.len() == 1 {
+        let ident = &param_idents[0];
+        let ty = &param_types[0];
+        quote! {
+            let #ident: #ty = serde_json::from_slice(data)
+                .map_err(|e| zel_core::protocol::ResourceError::CallbackError(
+                    format!("Failed to deserialize parameter: {}", e)
+                ))?;
+        }
+    } else {
+        quote! {
+            let params: (#(#param_types),*) = serde_json::from_slice(data)
+                .map_err(|e| zel_core::protocol::ResourceError::CallbackError(
+                    format!("Failed to deserialize parameters: {}", e)
+                ))?;
+            let (#(#param_idents),*) = params;
+        }
+    };
+
+    quote! {
+        service_builder.notification_resource(
+            #notif_name,
+            {
+                let service = self.clone();
+                move |
+                    ctx: zel_core::protocol::RequestContext,
+                    req: zel_core::protocol::Request,
+                    inner_rx: tokio_util::codec::FramedRead<
+                        iroh::endpoint::RecvStream,
+                        tokio_util::codec::LengthDelimitedCodec
+                    >,
+                    inner_tx: tokio_util::codec::FramedWrite<
+                        iroh::endpoint::SendStream,
+                        tokio_util::codec::LengthDelimitedCodec
+                    >
+                | {
+                    let service = service.clone();
+                    Box::pin(async move {
+                        // Extract body (for parameter support)
+                        let data = match &req.body {
+                            zel_core::protocol::Body::Notify(data) => data.as_ref(),
+                            zel_core::protocol::Body::Rpc(data) => data.as_ref(),
+                            _ => &[] as &[u8],
+                        };
+
+                        // Deserialize params (if any)
+                        #deserialize_params
+
+                        // Create NotificationSink and typed receiver
+                        let sink = zel_core::protocol::NotificationSink::new(inner_tx);
+                        let receiver = #typed_receiver_name { inner: inner_rx, sink };
+
+                        // Call user's notification method with context and typed receiver
+                        service.#rust_method(ctx, receiver, #(#param_idents),*).await
                             .map_err(|e| zel_core::protocol::ResourceError::CallbackError(
                                 e.to_string()
                             ))?;
@@ -452,6 +668,12 @@ fn render_client_struct(service: &ServiceDescription) -> TokenStream2 {
         .map(|s| render_client_subscription(s, service_name, trait_name))
         .collect();
 
+    let client_notifications: Vec<_> = service
+        .notifications
+        .iter()
+        .map(|n| render_client_notification(n, service_name, trait_name))
+        .collect();
+
     let client_streams: Vec<_> = service
         .streams
         .iter()
@@ -462,6 +684,12 @@ fn render_client_struct(service: &ServiceDescription) -> TokenStream2 {
         .subscriptions
         .iter()
         .map(|s| render_subscription_stream(s, trait_name))
+        .collect();
+
+    let notification_senders: Vec<_> = service
+        .notifications
+        .iter()
+        .map(|n| render_notification_sender(n, trait_name))
         .collect();
 
     quote! {
@@ -481,10 +709,12 @@ fn render_client_struct(service: &ServiceDescription) -> TokenStream2 {
 
             #(#client_methods)*
             #(#client_subscriptions)*
+            #(#client_notifications)*
             #(#client_streams)*
         }
 
         #(#subscription_streams)*
+        #(#notification_senders)*
     }
 }
 
@@ -581,6 +811,56 @@ fn render_client_subscription(
 
             let stream = self.client.subscribe(&self.service_name, #rpc_name, body).await?;
             Ok(#stream_name { inner: stream })
+        }
+    }
+}
+
+fn render_client_notification(
+    notif: &NotificationDescription,
+    _service_name: &str,
+    trait_name: &syn::Ident,
+) -> TokenStream2 {
+    let method_name = &notif.signature.sig.ident;
+    let rpc_name = &notif.rpc_name;
+    let sender_name = quote::format_ident!(
+        "{}{}",
+        trait_name,
+        capitalize_first(&method_name.to_string())
+    );
+    let sender_name = quote::format_ident!("{}Sender", sender_name);
+
+    let params = &notif.params;
+    let param_idents: Vec<_> = params.iter().map(|p| &p.ident).collect();
+    let param_types: Vec<_> = params.iter().map(|p| &p.ty).collect();
+
+    let serialize_params = if params.is_empty() {
+        quote! {
+            let body = None;
+        }
+    } else if params.len() == 1 {
+        let param = &param_idents[0];
+        quote! {
+            let param_body = serde_json::to_vec(&#param)
+                .map_err(|e| zel_core::protocol::ClientError::Serialization(e))?;
+            let body = Some(bytes::Bytes::from(param_body));
+        }
+    } else {
+        quote! {
+            let params = (#(#param_idents),*);
+            let param_body = serde_json::to_vec(&params)
+                .map_err(|e| zel_core::protocol::ClientError::Serialization(e))?;
+            let body = Some(bytes::Bytes::from(param_body));
+        }
+    };
+
+    quote! {
+        pub async fn #method_name(&self, #(#param_idents: #param_types),*)
+            -> Result<#sender_name, zel_core::protocol::ClientError>
+        {
+            #serialize_params
+
+            let sender = self.client.notify(&self.service_name, #rpc_name, body).await?;
+            Ok(#sender_name { inner: sender })
         }
     }
 }
@@ -683,10 +963,51 @@ fn render_subscription_stream(
     }
 }
 
-fn capitalize_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+fn render_notification_sender(
+    notif: &NotificationDescription,
+    trait_name: &syn::Ident,
+) -> TokenStream2 {
+    let method_name = &notif.signature.sig.ident;
+    let sender_name = quote::format_ident!(
+        "{}{}",
+        trait_name,
+        capitalize_first(&method_name.to_string())
+    );
+    let sender_name = quote::format_ident!("{}Sender", sender_name);
+
+    let item_type = notif
+        .item_type
+        .as_ref()
+        .map(|ty| quote! { #ty })
+        .unwrap_or_else(|| quote! { () });
+
+    quote! {
+        pub struct #sender_name {
+            inner: zel_core::protocol::NotificationSender,
+        }
+
+        impl #sender_name {
+            pub async fn send(&mut self, data: #item_type) -> Result<(), zel_core::protocol::ClientError> {
+                self.inner.send(data).await
+            }
+
+            pub async fn complete(self) -> Result<(), zel_core::protocol::ClientError> {
+                self.inner.complete().await
+            }
+        }
     }
+}
+
+fn capitalize_first(s: &str) -> String {
+    // Convert snake_case to CamelCase
+    s.split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        })
+        .collect()
 }

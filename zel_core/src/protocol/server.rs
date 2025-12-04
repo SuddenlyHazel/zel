@@ -234,6 +234,84 @@ async fn connection_handler<'a>(
                     }
                 });
             }
+            super::ResourceCallback::NotificationConsumer(callback) => {
+                // Open bidirectional stream for notification (client sends, server acks)
+                let Ok((notif_tx, notif_rx)) = connection.open_bi().await else {
+                    let error = ResourceError::CallbackError(
+                        "Failed to establish notification stream".into(),
+                    );
+                    let response: Result<Response, ResourceError> = Err(error);
+                    if let Ok(response_bytes) = serde_json::to_vec(&response) {
+                        let _ = tx.send(response_bytes.into()).await;
+                    }
+                    continue;
+                };
+
+                let ldc = LengthDelimitedCodec::new();
+                let mut notif_tx = FramedWrite::new(notif_tx, ldc);
+                let notif_rx = FramedRead::new(notif_rx, LengthDelimitedCodec::new());
+
+                // Send established ack on notification stream
+                let ack = super::NotificationMsg::Established {
+                    service: request.service.clone(),
+                    resource: request.resource.clone(),
+                };
+                let ack = serde_json::to_vec(&ack)
+                    .context("failed to serialize notification ack message")?;
+                if let Err(e) = notif_tx.send(ack.into()).await {
+                    log::error!(
+                        "attempted to send notification ack to peer {} but failed {e}",
+                        connection.remote_id()
+                    );
+                    let error = ResourceError::CallbackError(format!("Failed to send ack: {e}"));
+                    let response: Result<Response, ResourceError> = Err(error);
+                    if let Ok(response_bytes) = serde_json::to_vec(&response) {
+                        let _ = tx.send(response_bytes.into()).await;
+                    }
+                    continue;
+                }
+
+                // Send success response on main bidi stream
+                let response: Result<Response, ResourceError> = Ok(Response { data: Bytes::new() });
+                let response_bytes = serde_json::to_vec(&response)
+                    .context("failed to serialize notification response")?;
+                if let Err(e) = tx.send(response_bytes.into()).await {
+                    log::error!(
+                        "failed to send notification response to peer {}: {e}",
+                        connection.remote_id()
+                    );
+                    break;
+                }
+
+                // Spawn notification consumer task
+                let callback = callback.to_owned();
+                let conn_clone = connection.clone();
+                let server_ext_clone = server_extensions.clone();
+                let conn_ext_clone = connection_extensions.clone();
+                let middleware_clone = request_middleware.clone();
+
+                tokio::spawn(async move {
+                    let peer = conn_clone.remote_id();
+
+                    // Build RequestContext for notification
+                    let mut ctx = RequestContext::new(
+                        conn_clone,
+                        request.service.clone(),
+                        request.resource.clone(),
+                        server_ext_clone,
+                        conn_ext_clone,
+                    );
+
+                    // Apply request middleware chain
+                    for middleware in &middleware_clone {
+                        ctx = middleware(ctx).await;
+                    }
+
+                    if let Err(e) = (callback)(ctx, request, notif_rx, notif_tx).await {
+                        warn!("notification consumer task for peer {} failed {e}", peer);
+                    }
+                });
+            }
             super::ResourceCallback::StreamHandler(callback) => {
                 // Open new bidirectional stream for raw stream handler
                 let Ok((mut stream_tx, stream_rx)) = connection.open_bi().await else {

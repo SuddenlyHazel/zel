@@ -18,7 +18,7 @@ pub mod server;
 pub use zel_macros::zel_service;
 
 // Re-export client types for generated code
-pub use client::{ClientError, RpcClient, SubscriptionStream};
+pub use client::{ClientError, NotificationSender, RpcClient, SubscriptionStream};
 
 // Re-export new context types
 pub use context::RequestContext;
@@ -29,6 +29,7 @@ pub enum Body {
     Subscribe,
     Rpc(Bytes),
     Stream(Bytes), // Request to open a raw bidirectional stream, with optional serialized parameters
+    Notify(Bytes), // Request to establish notification stream (client-to-server streaming)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -48,6 +49,16 @@ pub enum SubscriptionMsg {
     Established { service: String, resource: String },
     Data(Bytes),
     Stopped,
+}
+
+/// Messages for notification streams (client-to-server streaming)
+#[derive(Debug, Serialize, Deserialize)]
+pub enum NotificationMsg {
+    Established { service: String, resource: String },
+    Data(Bytes),   // Client sends data
+    Ack,           // Server acknowledges receipt
+    Error(String), // Server reports error
+    Completed,     // Client signals completion
 }
 
 // Lowest level
@@ -91,6 +102,7 @@ pub struct RpcService<'a> {
 pub enum ResourceCallback {
     Rpc(Rpc),
     SubscriptionProducer(Subscription),
+    NotificationConsumer(NotificationHandler),
     StreamHandler(StreamHandler),
 }
 
@@ -114,6 +126,7 @@ impl Debug for ResourceCallback {
         match self {
             Self::Rpc(_) => f.debug_tuple("Rpc").finish(),
             Self::SubscriptionProducer(_) => f.debug_tuple("SubscriptionProducer").finish(),
+            Self::NotificationConsumer(_) => f.debug_tuple("NotificationConsumer").finish(),
             Self::StreamHandler(_) => f.debug_tuple("StreamHandler").finish(),
         }
     }
@@ -131,6 +144,27 @@ pub type Subscription = Arc<
             RequestContext,
             Request,
             FramedWrite<SendStream, LengthDelimitedCodec>,
+        ) -> BoxFuture<'static, ResourceResponse>,
+>;
+
+/// Handler for notification endpoints (client-to-server streaming).
+///
+/// Unlike subscriptions (server-to-client), notifications allow clients to push
+/// events to the server over time with acknowledgments.
+///
+/// The handler receives:
+/// - RequestContext with full middleware and extension support
+/// - Request containing service/resource info and optional parameters
+/// - FramedRead for receiving notification messages from client
+/// - FramedWrite for sending acknowledgments back to client
+pub type NotificationHandler = Arc<
+    dyn Send
+        + Sync
+        + Fn(
+            RequestContext,
+            Request,
+            tokio_util::codec::FramedRead<RecvStream, LengthDelimitedCodec>,
+            tokio_util::codec::FramedWrite<SendStream, LengthDelimitedCodec>,
         ) -> BoxFuture<'static, ResourceResponse>,
 >;
 
@@ -228,6 +262,71 @@ pub enum SubscriptionError {
 
     #[error("Send error: {0}")]
     Send(String),
+}
+
+// ============================================================================
+// Notification Sink Wrapper (Server-side)
+// ============================================================================
+
+use tokio_util::codec::FramedRead;
+
+/// Wrapper around FramedWrite for sending notification acknowledgments
+pub struct NotificationSink {
+    inner: FramedWrite<SendStream, LengthDelimitedCodec>,
+}
+
+impl NotificationSink {
+    /// Create a new NotificationSink from a FramedWrite
+    pub fn new(inner: FramedWrite<SendStream, LengthDelimitedCodec>) -> Self {
+        Self { inner }
+    }
+
+    /// Send an acknowledgment for the received notification
+    pub async fn ack(&mut self) -> Result<(), NotificationError> {
+        let msg = NotificationMsg::Ack;
+        let msg_bytes = serde_json::to_vec(&msg)
+            .map_err(|e| NotificationError::Serialization(e.to_string()))?;
+
+        self.inner
+            .send(msg_bytes.into())
+            .await
+            .map_err(|e| NotificationError::Send(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Send an error message to the client
+    pub async fn error(&mut self, error_msg: impl Into<String>) -> Result<(), NotificationError> {
+        let msg = NotificationMsg::Error(error_msg.into());
+        let msg_bytes = serde_json::to_vec(&msg)
+            .map_err(|e| NotificationError::Serialization(e.to_string()))?;
+
+        self.inner
+            .send(msg_bytes.into())
+            .await
+            .map_err(|e| NotificationError::Send(e.to_string()))?;
+
+        Ok(())
+    }
+}
+
+/// Errors that can occur when handling notifications
+#[derive(thiserror::Error, Debug)]
+pub enum NotificationError {
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+
+    #[error("Deserialization error: {0}")]
+    Deserialization(String),
+
+    #[error("Send error: {0}")]
+    Send(String),
+
+    #[error("Receive error: {0}")]
+    Receive(String),
+
+    #[error("Protocol error: {0}")]
+    Protocol(String),
 }
 
 pub struct ServiceRequest {
@@ -507,6 +606,33 @@ impl<'a> ServiceBuilder<'a> {
         self.resources.insert(
             name,
             ResourceCallback::SubscriptionProducer(Arc::new(callback)),
+        );
+        self
+    }
+
+    /// Add a notification resource to this service (client-to-server streaming)
+    ///
+    /// Notification resources allow clients to push events to the server over time
+    /// with acknowledgment support.
+    ///
+    /// # Arguments
+    /// * `name` - The resource name
+    /// * `callback` - The notification callback function
+    pub fn notification_resource<F>(mut self, name: &'a str, callback: F) -> Self
+    where
+        F: Fn(
+                RequestContext,
+                Request,
+                FramedRead<RecvStream, LengthDelimitedCodec>,
+                FramedWrite<SendStream, LengthDelimitedCodec>,
+            ) -> BoxFuture<'static, ResourceResponse>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.resources.insert(
+            name,
+            ResourceCallback::NotificationConsumer(Arc::new(callback)),
         );
         self
     }
