@@ -95,6 +95,7 @@ type ServiceMap<'a> = Arc<HashMap<&'a str, RpcService<'a>>>;
 
 #[derive(Debug)]
 pub struct RpcService<'a> {
+    #[allow(dead_code)]
     service: &'a str,
     resources: HashMap<&'a str, ResourceCallback>,
 }
@@ -327,19 +328,6 @@ pub enum NotificationError {
 
     #[error("Protocol error: {0}")]
     Protocol(String),
-}
-
-pub struct ServiceRequest {
-    req: Request,
-    connection: Connection,
-}
-
-pub trait RpcServiceT {
-    /// Processes a request to a Service
-    fn call<'a>(
-        &self,
-        request: ServiceRequest,
-    ) -> impl Future<Output = ResourceResponse> + Send + 'a;
 }
 
 #[cfg(test)]
