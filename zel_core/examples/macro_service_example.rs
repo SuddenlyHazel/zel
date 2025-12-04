@@ -1,9 +1,15 @@
 //! Example demonstrating the zel_service macro
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use zel_core::IrohBundle;
 use zel_core::protocol::{RpcServerBuilder, zel_service};
+
+#[derive(Serialize, Deserialize)]
+pub struct CounterMsg {
+    pub count : u64,
+}
 
 // Define a service using the macro
 #[zel_service(name = "calculator")]
@@ -17,7 +23,7 @@ trait Calculator {
     async fn multiply(&self, a: i32, b: i32) -> Result<i32, String>;
 
     /// Subscribe to a counter
-    #[subscription(name = "counter", item = "u64")]
+    #[subscription(name = "counter", item = "CounterMsg")]
     async fn counter(&self, interval_ms: u64) -> Result<(), String>;
 }
 
@@ -46,7 +52,7 @@ impl CalculatorServer for CalculatorImpl {
         for _ in 0..5 {
             interval.tick().await;
             count += 1;
-
+            let count = CounterMsg { count };
             if sink.send(count).await.is_err() {
                 break;
             }
@@ -118,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Receiving counter updates:");
     let mut updates = 0;
     while let Some(result) = stream.next().await {
-        let count = result?;
+        let CounterMsg { count } = result?;
         updates += 1;
         println!("  ├─ Count: {} (update #{})", count, updates);
 
