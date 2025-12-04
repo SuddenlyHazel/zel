@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use std::time::Duration;
 use zel_core::IrohBundle;
-use zel_core::protocol::{RpcServerBuilder, SubscriptionSink, zel_service};
+use zel_core::protocol::{RpcServerBuilder, zel_service};
 
 // Define a service using the macro
 #[zel_service(name = "calculator")]
@@ -35,7 +35,11 @@ impl CalculatorServer for CalculatorImpl {
         Ok(a * b)
     }
 
-    async fn counter(&self, mut sink: SubscriptionSink, interval_ms: u64) -> Result<(), String> {
+    async fn counter(
+        &self,
+        mut sink: CalculatorCounterSink,
+        interval_ms: u64,
+    ) -> Result<(), String> {
         let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
         let mut count = 0u64;
 
@@ -43,7 +47,7 @@ impl CalculatorServer for CalculatorImpl {
             interval.tick().await;
             count += 1;
 
-            if sink.send(&count).await.is_err() {
+            if sink.send(count).await.is_err() {
                 break;
             }
         }

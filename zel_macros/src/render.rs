@@ -4,9 +4,11 @@ use quote::quote;
 
 pub fn render_service(service: &ServiceDescription) -> TokenStream2 {
     let server_trait = render_server_trait(service);
+    let typed_sinks = render_typed_sinks(service);
     let client_struct = render_client_struct(service);
 
     quote! {
+        #typed_sinks
         #server_trait
         #client_struct
     }
@@ -31,7 +33,7 @@ fn render_server_trait(service: &ServiceDescription) -> TokenStream2 {
         })
         .collect();
 
-    // Render subscription signatures with injected sink parameter
+    // Render subscription signatures with injected TYPED sink parameter
     let subscriptions: Vec<_> = service
         .subscriptions
         .iter()
@@ -39,9 +41,17 @@ fn render_server_trait(service: &ServiceDescription) -> TokenStream2 {
             let mut sig = s.signature.sig.clone();
             let attrs = &s.signature.attrs;
 
-            // Insert sink parameter as second argument (after &self)
+            // Generate typed sink name
+            let method_name = &s.signature.sig.ident;
+            let sink_type = quote::format_ident!(
+                "{}{}Sink",
+                trait_name,
+                capitalize_first(&method_name.to_string())
+            );
+
+            // Insert TYPED sink parameter as second argument (after &self)
             let sink_param: syn::FnArg = syn::parse_quote! {
-                sink: zel_core::protocol::SubscriptionSink
+                sink: #sink_type
             };
             sig.inputs.insert(1, sink_param);
 
@@ -72,7 +82,54 @@ fn render_server_trait(service: &ServiceDescription) -> TokenStream2 {
     }
 }
 
+fn render_typed_sinks(service: &ServiceDescription) -> TokenStream2 {
+    let trait_name = &service.trait_ident;
+
+    let typed_sinks: Vec<_> = service
+        .subscriptions
+        .iter()
+        .map(|s| render_typed_sink(s, trait_name))
+        .collect();
+
+    quote! {
+        #(#typed_sinks)*
+    }
+}
+
+fn render_typed_sink(sub: &SubscriptionDescription, trait_name: &syn::Ident) -> TokenStream2 {
+    let method_name = &sub.signature.sig.ident;
+    let sink_name = quote::format_ident!(
+        "{}{}Sink",
+        trait_name,
+        capitalize_first(&method_name.to_string())
+    );
+
+    let item_type = sub
+        .item_type
+        .as_ref()
+        .map(|ty| quote! { #ty })
+        .unwrap_or_else(|| quote! { () });
+
+    quote! {
+        pub struct #sink_name {
+            inner: zel_core::protocol::SubscriptionSink,
+        }
+
+        impl #sink_name {
+            pub async fn send(&mut self, data: #item_type) -> Result<(), zel_core::protocol::SubscriptionError> {
+                self.inner.send(&data).await
+            }
+
+            pub async fn close(self) -> Result<(), zel_core::protocol::SubscriptionError> {
+                self.inner.close().await
+            }
+        }
+    }
+}
+
 fn render_into_builder_body(service: &ServiceDescription) -> TokenStream2 {
+    let trait_name = &service.trait_ident;
+
     let method_registrations: Vec<_> = service
         .methods
         .iter()
@@ -82,7 +139,7 @@ fn render_into_builder_body(service: &ServiceDescription) -> TokenStream2 {
     let subscription_registrations: Vec<_> = service
         .subscriptions
         .iter()
-        .map(render_subscription_registration)
+        .map(|s| render_subscription_registration(s, trait_name))
         .collect();
 
     quote! {
@@ -169,11 +226,21 @@ fn render_method_registration(method: &MethodDescription) -> TokenStream2 {
     }
 }
 
-fn render_subscription_registration(sub: &SubscriptionDescription) -> TokenStream2 {
+fn render_subscription_registration(
+    sub: &SubscriptionDescription,
+    trait_name: &syn::Ident,
+) -> TokenStream2 {
     let sub_name = &sub.rpc_name;
     let rust_method = &sub.signature.sig.ident;
     let param_idents: Vec<_> = sub.params.iter().map(|p| &p.ident).collect();
     let param_types: Vec<_> = sub.params.iter().map(|p| &p.ty).collect();
+
+    // Generate typed sink name
+    let typed_sink_name = quote::format_ident!(
+        "{}{}Sink",
+        trait_name,
+        capitalize_first(&rust_method.to_string())
+    );
 
     let deserialize_params = if param_idents.is_empty() {
         quote! {
@@ -222,10 +289,11 @@ fn render_subscription_registration(sub: &SubscriptionDescription) -> TokenStrea
                         // Deserialize params (if any)
                         #deserialize_params
 
-                        // Create SubscriptionSink wrapper
-                        let sink = zel_core::protocol::SubscriptionSink::new(inner_sink);
+                        // Create raw SubscriptionSink and wrap in typed sink
+                        let raw_sink = zel_core::protocol::SubscriptionSink::new(inner_sink);
+                        let sink = #typed_sink_name { inner: raw_sink };
 
-                        // Call user's subscription method
+                        // Call user's subscription method with typed sink
                         service.#rust_method(sink, #(#param_idents),*).await
                             .map_err(|e| zel_core::protocol::ResourceError::CallbackError(
                                 e.to_string()
