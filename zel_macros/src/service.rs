@@ -25,6 +25,7 @@ pub struct SubscriptionDescription {
     pub rpc_name: String,
     pub signature: TraitItemFn,
     pub params: Vec<ParamInfo>,
+    pub item_type: Option<syn::Type>,
 }
 
 impl ServiceDescription {
@@ -146,6 +147,7 @@ impl SubscriptionDescription {
             rpc_name: attr.name,
             signature: method,
             params,
+            item_type: attr.item,
         })
     }
 }

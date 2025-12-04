@@ -44,10 +44,11 @@ pub struct MethodAttr {
     pub name: String,
 }
 
-/// Subscription attribute: #[subscription(name = "...")]
+/// Subscription attribute: #[subscription(name = "...", item = "Type")]
 #[derive(Debug, Clone)]
 pub struct SubscriptionAttr {
     pub name: String,
+    pub item: Option<syn::Type>,
 }
 
 /// Parse method or subscription attributes from a method
@@ -110,20 +111,27 @@ impl From<MethodAttrParser> for MethodAttr {
 
 struct SubscriptionAttrParser {
     name: String,
+    item: Option<syn::Type>,
 }
 
 impl Parse for SubscriptionAttrParser {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut name = None;
+        let mut item = None;
 
         while !input.is_empty() {
             let key: syn::Ident = input.parse()?;
             input.parse::<Token![=]>()?;
-            let value: Lit = input.parse()?;
 
             if key == "name" {
+                let value: Lit = input.parse()?;
                 if let Lit::Str(s) = value {
                     name = Some(s.value());
+                }
+            } else if key == "item" {
+                let value: Lit = input.parse()?;
+                if let Lit::Str(s) = value {
+                    item = Some(syn::parse_str::<syn::Type>(&s.value())?);
                 }
             }
 
@@ -133,12 +141,15 @@ impl Parse for SubscriptionAttrParser {
         }
 
         name.ok_or_else(|| input.error("Missing 'name' attribute"))
-            .map(|name| SubscriptionAttrParser { name })
+            .map(|name| SubscriptionAttrParser { name, item })
     }
 }
 
 impl From<SubscriptionAttrParser> for SubscriptionAttr {
     fn from(p: SubscriptionAttrParser) -> Self {
-        SubscriptionAttr { name: p.name }
+        SubscriptionAttr {
+            name: p.name,
+            item: p.item,
+        }
     }
 }

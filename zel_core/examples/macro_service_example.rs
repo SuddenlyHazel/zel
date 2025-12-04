@@ -1,7 +1,6 @@
 //! Example demonstrating the zel_service macro
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use std::time::Duration;
 use zel_core::IrohBundle;
 use zel_core::protocol::{RpcServerBuilder, SubscriptionSink, zel_service};
@@ -18,7 +17,7 @@ trait Calculator {
     async fn multiply(&self, a: i32, b: i32) -> Result<i32, String>;
 
     /// Subscribe to a counter
-    #[subscription(name = "counter")]
+    #[subscription(name = "counter", item = "u64")]
     async fn counter(&self, interval_ms: u64) -> Result<(), String>;
 }
 
@@ -94,45 +93,34 @@ async fn main() -> anyhow::Result<()> {
     let client = zel_core::protocol::client::RpcClient::new(conn).await?;
     println!("✓ Client connected\n");
 
-    // Test RPC calls
+    // Create typed client using generated CalculatorClient
+    let calculator = CalculatorClient::new(client);
+
+    // Test RPC calls with type-safe interface
     println!("═══ Testing RPC Methods ═══");
 
-    let numbers = (10i32, 5i32);
-    let body = serde_json::to_vec(&numbers)?;
-    let response = client.call("calculator", "add", Bytes::from(body)).await?;
-    let sum: i32 = serde_json::from_slice(&response.data)?;
+    let sum = calculator.add(10, 5).await?;
     println!("✓ add(10, 5) = {}", sum);
 
-    let numbers = (10i32, 5i32);
-    let body = serde_json::to_vec(&numbers)?;
-    let response = client
-        .call("calculator", "multiply", Bytes::from(body))
-        .await?;
-    let product: i32 = serde_json::from_slice(&response.data)?;
+    let product = calculator.multiply(10, 5).await?;
     println!("✓ multiply(10, 5) = {}", product);
 
     println!("\n═══ Testing Subscription ═══");
 
-    // Test subscription
+    // Test subscription with typed stream
     use futures::StreamExt;
-    let interval_ms = 500u64;
-    let body = serde_json::to_vec(&interval_ms)?;
-    let mut stream = client
-        .subscribe("calculator", "counter", Some(Bytes::from(body)))
-        .await?;
+    let mut stream = calculator.counter(500).await?;
 
     println!("Receiving counter updates:");
+    let mut updates = 0;
     while let Some(result) = stream.next().await {
-        match result? {
-            zel_core::protocol::SubscriptionMsg::Data(data) => {
-                let count: u64 = serde_json::from_slice(&data)?;
-                println!("  ├─ Count: {}", count);
-            }
-            zel_core::protocol::SubscriptionMsg::Stopped => {
-                println!("  └─ Subscription stopped");
-                break;
-            }
-            _ => {}
+        let count = result?;
+        updates += 1;
+        println!("  ├─ Count: {} (update #{})", count, updates);
+
+        if updates >= 5 {
+            println!("  └─ Received {} updates", updates);
+            break;
         }
     }
 

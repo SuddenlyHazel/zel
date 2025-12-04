@@ -15,6 +15,9 @@ pub mod server;
 // Re-export the procedural macro
 pub use zel_macros::zel_service;
 
+// Re-export client types for generated code
+pub use client::{ClientError, RpcClient, SubscriptionStream};
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Body {
     Subscribe,
