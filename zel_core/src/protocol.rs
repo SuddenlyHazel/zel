@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use tokio_util::codec::{FramedWrite, LengthDelimitedCodec};
 
 pub mod client;
+pub mod context;
+pub mod extensions;
 pub mod server;
 
 // Re-export the procedural macro
@@ -17,6 +19,10 @@ pub use zel_macros::zel_service;
 
 // Re-export client types for generated code
 pub use client::{ClientError, RpcClient, SubscriptionStream};
+
+// Re-export new context types
+pub use context::RequestContext;
+pub use extensions::Extensions;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Body {
@@ -50,6 +56,7 @@ pub struct RpcServer<'a> {
     alpn: &'a [u8],
     endpoint: Endpoint,
     services: ServiceMap<'a>,
+    server_extensions: Extensions,
 }
 
 type ServiceMap<'a> = Arc<HashMap<&'a str, RpcService<'a>>>;
@@ -92,13 +99,13 @@ impl Debug for ResourceCallback {
 pub type ResourceResponse = Result<Response, ResourceError>;
 
 pub type Rpc =
-    Arc<dyn Send + Sync + Fn(Connection, Request) -> BoxFuture<'static, ResourceResponse>>;
+    Arc<dyn Send + Sync + Fn(RequestContext, Request) -> BoxFuture<'static, ResourceResponse>>;
 
 pub type Subscription = Arc<
     dyn Send
         + Sync
         + Fn(
-            Connection,
+            RequestContext,
             Request,
             FramedWrite<SendStream, LengthDelimitedCodec>,
         ) -> BoxFuture<'static, ResourceResponse>,
@@ -310,6 +317,7 @@ pub struct RpcServerBuilder<'a> {
     alpn: &'a [u8],
     endpoint: Endpoint,
     services: HashMap<&'a str, RpcService<'a>>,
+    server_extensions: Extensions,
 }
 
 impl<'a> RpcServerBuilder<'a> {
@@ -324,7 +332,14 @@ impl<'a> RpcServerBuilder<'a> {
             alpn,
             endpoint,
             services: HashMap::new(),
+            server_extensions: Extensions::new(),
         }
+    }
+
+    /// Set server-level extensions (shared across all connections)
+    pub fn with_extensions(mut self, extensions: Extensions) -> Self {
+        self.server_extensions = extensions;
+        self
     }
 
     /// Begin defining a service
@@ -344,6 +359,7 @@ impl<'a> RpcServerBuilder<'a> {
             alpn: self.alpn,
             endpoint: self.endpoint,
             services: Arc::new(self.services),
+            server_extensions: self.server_extensions,
         }
     }
 }
@@ -371,7 +387,10 @@ impl<'a> ServiceBuilder<'a> {
     /// * `callback` - The RPC callback function
     pub fn rpc_resource<F>(mut self, name: &'a str, callback: F) -> Self
     where
-        F: Fn(Connection, Request) -> BoxFuture<'static, ResourceResponse> + Send + Sync + 'static,
+        F: Fn(RequestContext, Request) -> BoxFuture<'static, ResourceResponse>
+            + Send
+            + Sync
+            + 'static,
     {
         self.resources
             .insert(name, ResourceCallback::Rpc(Arc::new(callback)));
@@ -386,7 +405,7 @@ impl<'a> ServiceBuilder<'a> {
     pub fn subscription_resource<F>(mut self, name: &'a str, callback: F) -> Self
     where
         F: Fn(
-                Connection,
+                RequestContext,
                 Request,
                 FramedWrite<SendStream, LengthDelimitedCodec>,
             ) -> BoxFuture<'static, ResourceResponse>

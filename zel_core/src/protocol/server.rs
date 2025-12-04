@@ -6,7 +6,8 @@ use log::{trace, warn};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 use crate::protocol::{
-    Request, ResourceError, ResourceResponse, Response, ServiceMap, SubscriptionMsg,
+    Extensions, Request, RequestContext, ResourceError, ResourceResponse, Response, ServiceMap,
+    SubscriptionMsg,
 };
 
 // Lowest level will establish a bidi connection and dispatch all requests
@@ -18,9 +19,10 @@ impl ProtocolHandler for super::RpcServer<'static> {
     ) -> impl Future<Output = Result<(), iroh::protocol::AcceptError>> + Send {
         trace!("incoming connection from {}", connection.remote_id());
         let services = self.services.clone();
+        let server_extensions = self.server_extensions.clone();
         async move {
             tokio::spawn(async move {
-                if let Err(e) = connection_handler(services, connection).await {
+                if let Err(e) = connection_handler(services, server_extensions, connection).await {
                     log::error!("{e}");
                 }
             });
@@ -31,8 +33,12 @@ impl ProtocolHandler for super::RpcServer<'static> {
 
 async fn connection_handler<'a>(
     service_map: ServiceMap<'a>,
+    server_extensions: Extensions,
     connection: Connection,
 ) -> anyhow::Result<()> {
+    // Create connection-scoped extensions
+    let connection_extensions = Extensions::new();
+
     let (tx, rx) = connection.accept_bi().await?;
 
     let mut tx = FramedWrite::new(tx, LengthDelimitedCodec::new());
@@ -83,7 +89,16 @@ async fn connection_handler<'a>(
 
         match resource {
             super::ResourceCallback::Rpc(callback) => {
-                let response: ResourceResponse = (callback)(connection.clone(), request).await;
+                // Build RequestContext with all three extension tiers
+                let ctx = RequestContext::new(
+                    connection.clone(),
+                    request.service.clone(),
+                    request.resource.clone(),
+                    server_extensions.clone(),
+                    connection_extensions.clone(),
+                );
+
+                let response: ResourceResponse = (callback)(ctx, request).await;
                 let response = match response {
                     Ok(r) => Ok(r),
                     Err(e) => Err(ResourceError::CallbackError(e.to_string())),
@@ -155,11 +170,23 @@ async fn connection_handler<'a>(
 
                 // Spawn publisher task
                 let callback = callback.to_owned();
-                let connection = connection.clone();
+                let conn_clone = connection.clone();
+                let server_ext_clone = server_extensions.clone();
+                let conn_ext_clone = connection_extensions.clone();
 
                 tokio::spawn(async move {
-                    let peer = connection.remote_id();
-                    if let Err(e) = (callback)(connection, request, sub_tx).await {
+                    let peer = conn_clone.remote_id();
+
+                    // Build RequestContext for subscription
+                    let ctx = RequestContext::new(
+                        conn_clone,
+                        request.service.clone(),
+                        request.resource.clone(),
+                        server_ext_clone,
+                        conn_ext_clone,
+                    );
+
+                    if let Err(e) = (callback)(ctx, request, sub_tx).await {
                         warn!("subscription task for peer {} failed {e}", peer);
                     }
                 });

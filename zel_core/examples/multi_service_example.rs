@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use zel_core::IrohBundle;
+use zel_core::protocol::RequestContext;
 use zel_core::protocol::{RpcServerBuilder, zel_service};
 
 // ============================================================================
@@ -38,16 +39,17 @@ struct CalculatorImpl;
 
 #[async_trait]
 impl CalculatorServer for CalculatorImpl {
-    async fn add(&self, a: i32, b: i32) -> Result<i32, String> {
+    async fn add(&self, _ctx: RequestContext, a: i32, b: i32) -> Result<i32, String> {
         Ok(a + b)
     }
 
-    async fn multiply(&self, a: i32, b: i32) -> Result<i32, String> {
+    async fn multiply(&self, _ctx: RequestContext, a: i32, b: i32) -> Result<i32, String> {
         Ok(a * b)
     }
 
     async fn counter(
         &self,
+        _ctx: RequestContext,
         mut sink: CalculatorCounterSink,
         interval_ms: u64,
     ) -> Result<(), String> {
@@ -92,7 +94,7 @@ struct HelloImpl;
 
 #[async_trait]
 impl HelloServer for HelloImpl {
-    async fn greet(&self, name: String) -> Result<Greeting, String> {
+    async fn greet(&self, _ctx: RequestContext, name: String) -> Result<Greeting, String> {
         use std::time::SystemTime;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -104,12 +106,13 @@ impl HelloServer for HelloImpl {
         })
     }
 
-    async fn farewell(&self, name: String) -> Result<String, String> {
+    async fn farewell(&self, _ctx: RequestContext, name: String) -> Result<String, String> {
         Ok(format!("Goodbye, {}! Thanks for using Zel!", name))
     }
 
     async fn notifications(
         &self,
+        _ctx: RequestContext,
         mut sink: HelloNotificationsSink,
         topic: String,
     ) -> Result<(), String> {

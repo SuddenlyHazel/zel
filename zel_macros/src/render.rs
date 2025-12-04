@@ -18,13 +18,19 @@ fn render_server_trait(service: &ServiceDescription) -> TokenStream2 {
     let trait_name = &service.trait_ident;
     let server_name = quote::format_ident!("{}Server", trait_name);
 
-    // Render method signatures
+    // Render method signatures with injected RequestContext
     let methods: Vec<_> = service
         .methods
         .iter()
         .map(|m| {
-            let sig = &m.signature.sig;
+            let mut sig = m.signature.sig.clone();
             let attrs = &m.signature.attrs;
+
+            // Insert RequestContext parameter as first argument (after &self)
+            let ctx_param: syn::FnArg = syn::parse_quote! {
+                ctx: zel_core::protocol::RequestContext
+            };
+            sig.inputs.insert(1, ctx_param);
 
             quote! {
                 #(#attrs)*
@@ -33,7 +39,7 @@ fn render_server_trait(service: &ServiceDescription) -> TokenStream2 {
         })
         .collect();
 
-    // Render subscription signatures with injected TYPED sink parameter
+    // Render subscription signatures with injected RequestContext and TYPED sink parameter
     let subscriptions: Vec<_> = service
         .subscriptions
         .iter()
@@ -49,11 +55,17 @@ fn render_server_trait(service: &ServiceDescription) -> TokenStream2 {
                 capitalize_first(&method_name.to_string())
             );
 
-            // Insert TYPED sink parameter as second argument (after &self)
+            // Insert RequestContext parameter as first argument (after &self)
+            let ctx_param: syn::FnArg = syn::parse_quote! {
+                ctx: zel_core::protocol::RequestContext
+            };
+            sig.inputs.insert(1, ctx_param);
+
+            // Insert TYPED sink parameter as second argument (after &self and ctx)
             let sink_param: syn::FnArg = syn::parse_quote! {
                 sink: #sink_type
             };
-            sig.inputs.insert(1, sink_param);
+            sig.inputs.insert(2, sink_param);
 
             quote! {
                 #(#attrs)*
@@ -191,7 +203,7 @@ fn render_method_registration(method: &MethodDescription) -> TokenStream2 {
             #method_name,
             {
                 let service = self.clone();
-                move |_conn: iroh::endpoint::Connection, req: zel_core::protocol::Request| {
+                move |ctx: zel_core::protocol::RequestContext, req: zel_core::protocol::Request| {
                     let service = service.clone();
                     Box::pin(async move {
                         // Extract body
@@ -204,8 +216,8 @@ fn render_method_registration(method: &MethodDescription) -> TokenStream2 {
                         // Deserialize params
                         #deserialize_params
 
-                        // Call user's method
-                        let result = service.#rust_method(#(#param_idents),*).await
+                        // Call user's method with context
+                        let result = service.#rust_method(ctx, #(#param_idents),*).await
                             .map_err(|e| zel_core::protocol::ResourceError::CallbackError(
                                 e.to_string()
                             ))?;
@@ -271,7 +283,7 @@ fn render_subscription_registration(
             {
                 let service = self.clone();
                 move |
-                    _conn: iroh::endpoint::Connection,
+                    ctx: zel_core::protocol::RequestContext,
                     req: zel_core::protocol::Request,
                     inner_sink: tokio_util::codec::FramedWrite<
                         iroh::endpoint::SendStream,
@@ -293,8 +305,8 @@ fn render_subscription_registration(
                         let raw_sink = zel_core::protocol::SubscriptionSink::new(inner_sink);
                         let sink = #typed_sink_name { inner: raw_sink };
 
-                        // Call user's subscription method with typed sink
-                        service.#rust_method(sink, #(#param_idents),*).await
+                        // Call user's subscription method with context and typed sink
+                        service.#rust_method(ctx, sink, #(#param_idents),*).await
                             .map_err(|e| zel_core::protocol::ResourceError::CallbackError(
                                 e.to_string()
                             ))?;
