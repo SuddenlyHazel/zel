@@ -1,6 +1,6 @@
 [package]
 name = "zel_core"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Type-safe RPC framework built on Iroh with support for methods, subscriptions, notifications, and raw streams"
 license = "MIT OR Apache-2.0"
