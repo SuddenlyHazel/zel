@@ -12,6 +12,9 @@ use tokio_util::codec::{FramedWrite, LengthDelimitedCodec};
 pub mod client;
 pub mod server;
 
+// Re-export the procedural macro
+pub use zel_macros::zel_service;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Body {
     Subscribe,
@@ -97,6 +100,67 @@ pub type Subscription = Arc<
             FramedWrite<SendStream, LengthDelimitedCodec>,
         ) -> BoxFuture<'static, ResourceResponse>,
 >;
+
+// ============================================================================
+// Subscription Sink Wrapper
+// ============================================================================
+
+use futures::SinkExt;
+
+/// Wrapper around FramedWrite for easy subscription message sending
+pub struct SubscriptionSink {
+    inner: FramedWrite<SendStream, LengthDelimitedCodec>,
+}
+
+impl SubscriptionSink {
+    /// Create a new SubscriptionSink from a FramedWrite
+    pub fn new(inner: FramedWrite<SendStream, LengthDelimitedCodec>) -> Self {
+        Self { inner }
+    }
+
+    /// Send data to the subscription
+    ///
+    /// Automatically wraps the data in SubscriptionMsg::Data and serializes it.
+    pub async fn send<T: Serialize>(&mut self, data: T) -> Result<(), SubscriptionError> {
+        let data = serde_json::to_vec(&data)
+            .map_err(|e| SubscriptionError::Serialization(e.to_string()))?;
+
+        let msg = SubscriptionMsg::Data(Bytes::from(data));
+        let msg_bytes = serde_json::to_vec(&msg)
+            .map_err(|e| SubscriptionError::Serialization(e.to_string()))?;
+
+        self.inner
+            .send(msg_bytes.into())
+            .await
+            .map_err(|e| SubscriptionError::Send(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Send the stopped message and close the subscription
+    pub async fn close(mut self) -> Result<(), SubscriptionError> {
+        let msg = SubscriptionMsg::Stopped;
+        let msg_bytes = serde_json::to_vec(&msg)
+            .map_err(|e| SubscriptionError::Serialization(e.to_string()))?;
+
+        self.inner
+            .send(msg_bytes.into())
+            .await
+            .map_err(|e| SubscriptionError::Send(e.to_string()))?;
+
+        Ok(())
+    }
+}
+
+/// Errors that can occur when sending subscription messages
+#[derive(thiserror::Error, Debug)]
+pub enum SubscriptionError {
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+
+    #[error("Send error: {0}")]
+    Send(String),
+}
 
 pub struct ServiceRequest {
     req: Request,

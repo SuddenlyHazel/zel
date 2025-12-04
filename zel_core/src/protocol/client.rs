@@ -111,6 +111,7 @@ impl RpcClient {
     /// # Arguments
     /// * `service` - The service name
     /// * `resource` - The resource name
+    /// * `body` - Optional request body data (parameters for the subscription)
     ///
     /// # Returns
     /// A `SubscriptionStream` that yields subscription messages
@@ -118,6 +119,7 @@ impl RpcClient {
         &self,
         service: impl Into<String>,
         resource: impl Into<String>,
+        body: Option<Bytes>,
     ) -> Result<SubscriptionStream, ClientError> {
         let service = service.into();
         let resource = resource.into();
@@ -126,7 +128,10 @@ impl RpcClient {
         let request = Request {
             service: service.clone(),
             resource: resource.clone(),
-            body: Body::Subscribe,
+            body: match body {
+                Some(data) => Body::Rpc(data),
+                None => Body::Subscribe,
+            },
         };
 
         let request_bytes = serde_json::to_vec(&request)?;
