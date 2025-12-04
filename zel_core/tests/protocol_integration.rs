@@ -108,7 +108,7 @@ async fn test_subscription_lifecycle() {
     let client = RpcClient::new(conn).await.unwrap();
 
     // Subscribe
-    let mut stream = client.subscribe("events", "stream").await.unwrap();
+    let mut stream = client.subscribe("events", "stream", None).await.unwrap();
 
     // Receive messages
     let mut count = 0;
@@ -173,8 +173,8 @@ async fn test_multiple_concurrent_subscriptions() {
     let client = RpcClient::new(conn).await.unwrap();
 
     // Create two subscriptions
-    let mut stream1 = client.subscribe("counters", "count").await.unwrap();
-    let mut stream2 = client.subscribe("counters", "count").await.unwrap();
+    let mut stream1 = client.subscribe("counters", "count", None).await.unwrap();
+    let mut stream2 = client.subscribe("counters", "count", None).await.unwrap();
 
     // Collect from both streams
     let mut count1 = 0;
@@ -354,7 +354,7 @@ async fn test_client_drop_unsubscribe() {
 
     {
         // Subscribe and receive a few messages
-        let mut stream = client.subscribe("infinite", "stream").await.unwrap();
+        let mut stream = client.subscribe("infinite", "stream", None).await.unwrap();
 
         // Receive 3 messages then drop
         for _ in 0..3 {
