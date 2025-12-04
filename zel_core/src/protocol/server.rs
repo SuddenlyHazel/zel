@@ -6,7 +6,8 @@ use log::{trace, warn};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 use crate::protocol::{
-    Request, ResourceError, ResourceResponse, Response, ServiceMap, SubscriptionMsg,
+    Extensions, Request, RequestContext, ResourceError, ResourceResponse, Response, ServiceMap,
+    SubscriptionMsg,
 };
 
 // Lowest level will establish a bidi connection and dispatch all requests
@@ -18,9 +19,20 @@ impl ProtocolHandler for super::RpcServer<'static> {
     ) -> impl Future<Output = Result<(), iroh::protocol::AcceptError>> + Send {
         trace!("incoming connection from {}", connection.remote_id());
         let services = self.services.clone();
+        let server_extensions = self.server_extensions.clone();
+        let connection_hook = self.connection_hook.clone();
+        let request_middleware = self.request_middleware.clone();
         async move {
             tokio::spawn(async move {
-                if let Err(e) = connection_handler(services, connection).await {
+                if let Err(e) = connection_handler(
+                    services,
+                    server_extensions,
+                    connection_hook,
+                    request_middleware,
+                    connection,
+                )
+                .await
+                {
                     log::error!("{e}");
                 }
             });
@@ -31,8 +43,34 @@ impl ProtocolHandler for super::RpcServer<'static> {
 
 async fn connection_handler<'a>(
     service_map: ServiceMap<'a>,
+    server_extensions: Extensions,
+    connection_hook: Option<super::ConnectionHook>,
+    request_middleware: Vec<super::RequestMiddleware>,
     connection: Connection,
 ) -> anyhow::Result<()> {
+    // Call connection hook to populate connection-scoped extensions
+    let connection_extensions = if let Some(hook) = connection_hook {
+        match hook(&connection, server_extensions.clone()).await {
+            Ok(ext) => {
+                log::trace!(
+                    "Connection hook populated extensions for {}",
+                    connection.remote_id()
+                );
+                ext
+            }
+            Err(e) => {
+                log::warn!(
+                    "Connection hook failed for {}: {}. Using empty extensions.",
+                    connection.remote_id(),
+                    e
+                );
+                Extensions::new()
+            }
+        }
+    } else {
+        Extensions::new()
+    };
+
     let (tx, rx) = connection.accept_bi().await?;
 
     let mut tx = FramedWrite::new(tx, LengthDelimitedCodec::new());
@@ -83,7 +121,21 @@ async fn connection_handler<'a>(
 
         match resource {
             super::ResourceCallback::Rpc(callback) => {
-                let response: ResourceResponse = (callback)(connection.clone(), request).await;
+                // Build RequestContext with all three extension tiers
+                let mut ctx = RequestContext::new(
+                    connection.clone(),
+                    request.service.clone(),
+                    request.resource.clone(),
+                    server_extensions.clone(),
+                    connection_extensions.clone(),
+                );
+
+                // Apply request middleware chain
+                for middleware in &request_middleware {
+                    ctx = middleware(ctx).await;
+                }
+
+                let response: ResourceResponse = (callback)(ctx, request).await;
                 let response = match response {
                     Ok(r) => Ok(r),
                     Err(e) => Err(ResourceError::CallbackError(e.to_string())),
@@ -155,11 +207,29 @@ async fn connection_handler<'a>(
 
                 // Spawn publisher task
                 let callback = callback.to_owned();
-                let connection = connection.clone();
+                let conn_clone = connection.clone();
+                let server_ext_clone = server_extensions.clone();
+                let conn_ext_clone = connection_extensions.clone();
+                let middleware_clone = request_middleware.clone();
 
                 tokio::spawn(async move {
-                    let peer = connection.remote_id();
-                    if let Err(e) = (callback)(connection, request, sub_tx).await {
+                    let peer = conn_clone.remote_id();
+
+                    // Build RequestContext for subscription
+                    let mut ctx = RequestContext::new(
+                        conn_clone,
+                        request.service.clone(),
+                        request.resource.clone(),
+                        server_ext_clone,
+                        conn_ext_clone,
+                    );
+
+                    // Apply request middleware chain
+                    for middleware in &middleware_clone {
+                        ctx = middleware(ctx).await;
+                    }
+
+                    if let Err(e) = (callback)(ctx, request, sub_tx).await {
                         warn!("subscription task for peer {} failed {e}", peer);
                     }
                 });

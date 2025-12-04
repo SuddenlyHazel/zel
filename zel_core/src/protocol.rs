@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use tokio_util::codec::{FramedWrite, LengthDelimitedCodec};
 
 pub mod client;
+pub mod context;
+pub mod extensions;
 pub mod server;
 
 // Re-export the procedural macro
@@ -17,6 +19,10 @@ pub use zel_macros::zel_service;
 
 // Re-export client types for generated code
 pub use client::{ClientError, RpcClient, SubscriptionStream};
+
+// Re-export new context types
+pub use context::RequestContext;
+pub use extensions::Extensions;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Body {
@@ -44,12 +50,33 @@ pub enum SubscriptionMsg {
 }
 
 // Lowest level
-#[derive(Debug)]
 pub struct RpcServer<'a> {
     // APLN for all the child service
     alpn: &'a [u8],
     endpoint: Endpoint,
     services: ServiceMap<'a>,
+    server_extensions: Extensions,
+    connection_hook: Option<ConnectionHook>,
+    request_middleware: Vec<RequestMiddleware>,
+}
+
+impl<'a> std::fmt::Debug for RpcServer<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RpcServer")
+            .field("alpn", &self.alpn)
+            .field("endpoint", &self.endpoint)
+            .field("services", &self.services)
+            .field("server_extensions", &self.server_extensions)
+            .field(
+                "connection_hook",
+                &self
+                    .connection_hook
+                    .as_ref()
+                    .map(|_| "Some(ConnectionHook)"),
+            )
+            .field("request_middleware_count", &self.request_middleware.len())
+            .finish()
+    }
 }
 
 type ServiceMap<'a> = Arc<HashMap<&'a str, RpcService<'a>>>;
@@ -92,17 +119,35 @@ impl Debug for ResourceCallback {
 pub type ResourceResponse = Result<Response, ResourceError>;
 
 pub type Rpc =
-    Arc<dyn Send + Sync + Fn(Connection, Request) -> BoxFuture<'static, ResourceResponse>>;
+    Arc<dyn Send + Sync + Fn(RequestContext, Request) -> BoxFuture<'static, ResourceResponse>>;
 
 pub type Subscription = Arc<
     dyn Send
         + Sync
         + Fn(
-            Connection,
+            RequestContext,
             Request,
             FramedWrite<SendStream, LengthDelimitedCodec>,
         ) -> BoxFuture<'static, ResourceResponse>,
 >;
+
+/// Hook called when a new connection is established.
+///
+/// Receives the connection and server extensions, returns connection extensions.
+/// Can be used for authentication, session initialization, etc.
+///
+/// If the hook returns an error, the connection will still be accepted but
+/// connection extensions will be empty.
+pub type ConnectionHook = Arc<
+    dyn Send + Sync + Fn(&Connection, Extensions) -> BoxFuture<'static, Result<Extensions, String>>,
+>;
+
+/// Middleware that can modify RequestContext before it reaches handlers.
+///
+/// Useful for adding trace IDs, timing, logging, etc.
+/// Middleware is applied in the order it was added to the builder.
+pub type RequestMiddleware =
+    Arc<dyn Send + Sync + Fn(RequestContext) -> BoxFuture<'static, RequestContext>>;
 
 // ============================================================================
 // Subscription Sink Wrapper
@@ -310,6 +355,9 @@ pub struct RpcServerBuilder<'a> {
     alpn: &'a [u8],
     endpoint: Endpoint,
     services: HashMap<&'a str, RpcService<'a>>,
+    server_extensions: Extensions,
+    connection_hook: Option<ConnectionHook>,
+    request_middleware: Vec<RequestMiddleware>,
 }
 
 impl<'a> RpcServerBuilder<'a> {
@@ -324,7 +372,43 @@ impl<'a> RpcServerBuilder<'a> {
             alpn,
             endpoint,
             services: HashMap::new(),
+            server_extensions: Extensions::new(),
+            connection_hook: None,
+            request_middleware: Vec::new(),
         }
+    }
+
+    /// Set server-level extensions (shared across all connections)
+    pub fn with_extensions(mut self, extensions: Extensions) -> Self {
+        self.server_extensions = extensions;
+        self
+    }
+
+    /// Set a connection hook for populating connection-level extensions
+    ///
+    /// The hook is called once per connection and can be used for authentication,
+    /// session initialization, or any per-connection setup.
+    pub fn with_connection_hook<F>(mut self, hook: F) -> Self
+    where
+        F: Fn(&Connection, Extensions) -> BoxFuture<'static, Result<Extensions, String>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.connection_hook = Some(Arc::new(hook));
+        self
+    }
+
+    /// Add request middleware for enriching RequestContext before handlers
+    ///
+    /// Middleware is applied in the order it was added. Each middleware receives
+    /// the context and can add request-level extensions.
+    pub fn with_request_middleware<F>(mut self, middleware: F) -> Self
+    where
+        F: Fn(RequestContext) -> BoxFuture<'static, RequestContext> + Send + Sync + 'static,
+    {
+        self.request_middleware.push(Arc::new(middleware));
+        self
     }
 
     /// Begin defining a service
@@ -344,6 +428,9 @@ impl<'a> RpcServerBuilder<'a> {
             alpn: self.alpn,
             endpoint: self.endpoint,
             services: Arc::new(self.services),
+            server_extensions: self.server_extensions,
+            connection_hook: self.connection_hook,
+            request_middleware: self.request_middleware,
         }
     }
 }
@@ -371,7 +458,10 @@ impl<'a> ServiceBuilder<'a> {
     /// * `callback` - The RPC callback function
     pub fn rpc_resource<F>(mut self, name: &'a str, callback: F) -> Self
     where
-        F: Fn(Connection, Request) -> BoxFuture<'static, ResourceResponse> + Send + Sync + 'static,
+        F: Fn(RequestContext, Request) -> BoxFuture<'static, ResourceResponse>
+            + Send
+            + Sync
+            + 'static,
     {
         self.resources
             .insert(name, ResourceCallback::Rpc(Arc::new(callback)));
@@ -386,7 +476,7 @@ impl<'a> ServiceBuilder<'a> {
     pub fn subscription_resource<F>(mut self, name: &'a str, callback: F) -> Self
     where
         F: Fn(
-                Connection,
+                RequestContext,
                 Request,
                 FramedWrite<SendStream, LengthDelimitedCodec>,
             ) -> BoxFuture<'static, ResourceResponse>

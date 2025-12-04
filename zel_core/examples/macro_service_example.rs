@@ -4,11 +4,11 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use zel_core::IrohBundle;
-use zel_core::protocol::{RpcServerBuilder, zel_service};
+use zel_core::protocol::{RequestContext, RpcServerBuilder, zel_service};
 
 #[derive(Serialize, Deserialize)]
 pub struct CounterMsg {
-    pub count : u64,
+    pub count: u64,
 }
 
 // Define a service using the macro
@@ -33,19 +33,23 @@ struct CalculatorImpl;
 
 #[async_trait]
 impl CalculatorServer for CalculatorImpl {
-    async fn add(&self, a: i32, b: i32) -> Result<i32, String> {
+    async fn add(&self, ctx: RequestContext, a: i32, b: i32) -> Result<i32, String> {
+        log::info!("add called from peer: {}", ctx.remote_id());
         Ok(a + b)
     }
 
-    async fn multiply(&self, a: i32, b: i32) -> Result<i32, String> {
+    async fn multiply(&self, ctx: RequestContext, a: i32, b: i32) -> Result<i32, String> {
+        log::info!("multiply called from peer: {}", ctx.remote_id());
         Ok(a * b)
     }
 
     async fn counter(
         &self,
+        ctx: RequestContext,
         mut sink: CalculatorCounterSink,
         interval_ms: u64,
     ) -> Result<(), String> {
+        log::info!("counter subscription from peer: {}", ctx.remote_id());
         let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
         let mut count = 0u64;
 
@@ -65,12 +69,12 @@ impl CalculatorServer for CalculatorImpl {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .filter(Some("iroh"), log::LevelFilter::Off)
-        .init();
+    // env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+    //     .filter(Some("iroh"), log::LevelFilter::Off)
+    //     .init();
 
     println!("╔════════════════════════════════════════╗");
-    println!("║  Zel Service Macro Example            ║");
+    println!("║       Zel Service Macro Example        ║");
     println!("╚════════════════════════════════════════╝\n");
 
     // Build server
