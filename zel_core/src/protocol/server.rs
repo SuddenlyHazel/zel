@@ -234,6 +234,75 @@ async fn connection_handler<'a>(
                     }
                 });
             }
+            super::ResourceCallback::StreamHandler(callback) => {
+                // Open new bidirectional stream for raw stream handler
+                let Ok((mut stream_tx, stream_rx)) = connection.open_bi().await else {
+                    let error = ResourceError::CallbackError("Failed to open bidi stream".into());
+                    let response: Result<Response, ResourceError> = Err(error);
+                    if let Ok(response_bytes) = serde_json::to_vec(&response) {
+                        let _ = tx.send(response_bytes.into()).await;
+                    }
+                    continue;
+                };
+
+                // CRITICAL: Must write to stream BEFORE client accept_bi() will succeed
+                // Send a simple ACK byte to establish the stream
+                if let Err(e) = stream_tx.write_all(b"OK").await {
+                    log::error!(
+                        "failed to send stream ACK to peer {}: {e}",
+                        connection.remote_id()
+                    );
+                    let error =
+                        ResourceError::CallbackError(format!("Failed to send stream ACK: {e}"));
+                    let response: Result<Response, ResourceError> = Err(error);
+                    if let Ok(response_bytes) = serde_json::to_vec(&response) {
+                        let _ = tx.send(response_bytes.into()).await;
+                    }
+                    continue;
+                };
+
+                // Send success response on main connection
+                let response: Result<Response, ResourceError> = Ok(Response { data: Bytes::new() });
+                let response_bytes = serde_json::to_vec(&response)
+                    .context("failed to serialize response something really bad is happening")?;
+                if let Err(e) = tx.send(response_bytes.into()).await {
+                    log::error!(
+                        "failed to send stream response to peer {}: {e}",
+                        connection.remote_id()
+                    );
+                    break;
+                }
+
+                // Spawn stream handler task with RAW streams (no codec wrapping)
+                let callback = callback.to_owned();
+                let conn_clone = connection.clone();
+                let server_ext_clone = server_extensions.clone();
+                let conn_ext_clone = connection_extensions.clone();
+                let middleware_clone = request_middleware.clone();
+
+                tokio::spawn(async move {
+                    let peer = conn_clone.remote_id();
+
+                    // Build RequestContext for stream handler
+                    let mut ctx = RequestContext::new(
+                        conn_clone,
+                        request.service.clone(),
+                        request.resource.clone(),
+                        server_ext_clone,
+                        conn_ext_clone,
+                    );
+
+                    // Apply request middleware chain
+                    for middleware in &middleware_clone {
+                        ctx = middleware(ctx).await;
+                    }
+
+                    // Call handler with raw streams - no framing/codec
+                    if let Err(e) = (callback)(ctx, request, stream_tx, stream_rx).await {
+                        warn!("stream handler task for peer {} failed {e}", peer);
+                    }
+                });
+            }
         }
     }
     Ok(())

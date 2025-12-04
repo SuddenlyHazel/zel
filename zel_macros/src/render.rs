@@ -1,4 +1,6 @@
-use crate::service::{MethodDescription, ServiceDescription, SubscriptionDescription};
+use crate::service::{
+    MethodDescription, ServiceDescription, StreamDescription, SubscriptionDescription,
+};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 
@@ -74,6 +76,39 @@ fn render_server_trait(service: &ServiceDescription) -> TokenStream2 {
         })
         .collect();
 
+    // Render stream signatures with injected RequestContext and raw SendStream/RecvStream
+    let streams: Vec<_> = service
+        .streams
+        .iter()
+        .map(|s| {
+            let mut sig = s.signature.sig.clone();
+            let attrs = &s.signature.attrs;
+
+            // Insert RequestContext parameter as first argument (after &self)
+            let ctx_param: syn::FnArg = syn::parse_quote! {
+                ctx: zel_core::protocol::RequestContext
+            };
+            sig.inputs.insert(1, ctx_param);
+
+            // Insert SendStream parameter as second argument
+            let send_param: syn::FnArg = syn::parse_quote! {
+                send: iroh::endpoint::SendStream
+            };
+            sig.inputs.insert(2, send_param);
+
+            // Insert RecvStream parameter as third argument
+            let recv_param: syn::FnArg = syn::parse_quote! {
+                recv: iroh::endpoint::RecvStream
+            };
+            sig.inputs.insert(3, recv_param);
+
+            quote! {
+                #(#attrs)*
+                #sig;
+            }
+        })
+        .collect();
+
     // Generate the into_service_builder method body
     let into_builder_body = render_into_builder_body(service);
 
@@ -82,6 +117,7 @@ fn render_server_trait(service: &ServiceDescription) -> TokenStream2 {
         pub trait #server_name: Clone + Send + Sync + 'static {
             #(#methods)*
             #(#subscriptions)*
+            #(#streams)*
 
             /// Convert this service implementation into a ServiceBuilder with registered resources
             fn into_service_builder(
@@ -154,6 +190,12 @@ fn render_into_builder_body(service: &ServiceDescription) -> TokenStream2 {
         .map(|s| render_subscription_registration(s, trait_name))
         .collect();
 
+    let stream_registrations: Vec<_> = service
+        .streams
+        .iter()
+        .map(render_stream_registration)
+        .collect();
+
     quote! {
         let service_builder = service_builder;
 
@@ -163,6 +205,10 @@ fn render_into_builder_body(service: &ServiceDescription) -> TokenStream2 {
 
         #(
             let service_builder = #subscription_registrations;
+        )*
+
+        #(
+            let service_builder = #stream_registrations;
         )*
 
         service_builder
@@ -296,6 +342,7 @@ fn render_subscription_registration(
                         let data = match &req.body {
                             zel_core::protocol::Body::Subscribe => &[] as &[u8],
                             zel_core::protocol::Body::Rpc(data) => data.as_ref(),
+                            zel_core::protocol::Body::Stream(data) => data.as_ref(),
                         };
 
                         // Deserialize params (if any)
@@ -307,6 +354,73 @@ fn render_subscription_registration(
 
                         // Call user's subscription method with context and typed sink
                         service.#rust_method(ctx, sink, #(#param_idents),*).await
+                            .map_err(|e| zel_core::protocol::ResourceError::CallbackError(
+                                e.to_string()
+                            ))?;
+
+                        Ok(zel_core::protocol::Response {
+                            data: bytes::Bytes::new()
+                        })
+                    })
+                }
+            }
+        )
+    }
+}
+
+fn render_stream_registration(stream: &StreamDescription) -> TokenStream2 {
+    let stream_name = &stream.rpc_name;
+    let rust_method = &stream.signature.sig.ident;
+    let param_idents: Vec<_> = stream.params.iter().map(|p| &p.ident).collect();
+    let param_types: Vec<_> = stream.params.iter().map(|p| &p.ty).collect();
+
+    let deserialize_params = if param_idents.is_empty() {
+        quote! {
+            // No parameters
+        }
+    } else if param_idents.len() == 1 {
+        let ident = &param_idents[0];
+        let ty = &param_types[0];
+        quote! {
+            let #ident: #ty = serde_json::from_slice(data)
+                .map_err(|e| zel_core::protocol::ResourceError::CallbackError(
+                    format!("Failed to deserialize parameter: {}", e)
+                ))?;
+        }
+    } else {
+        quote! {
+            let params: (#(#param_types),*) = serde_json::from_slice(data)
+                .map_err(|e| zel_core::protocol::ResourceError::CallbackError(
+                    format!("Failed to deserialize parameters: {}", e)
+                ))?;
+            let (#(#param_idents),*) = params;
+        }
+    };
+
+    quote! {
+        service_builder.stream_resource(
+            #stream_name,
+            {
+                let service = self.clone();
+                move |
+                    ctx: zel_core::protocol::RequestContext,
+                    req: zel_core::protocol::Request,
+                    send: iroh::endpoint::SendStream,
+                    recv: iroh::endpoint::RecvStream,
+                | {
+                    let service = service.clone();
+                    Box::pin(async move {
+                        // Extract body for parameter deserialization
+                        let data = match &req.body {
+                            zel_core::protocol::Body::Stream(data) => data.as_ref(),
+                            _ => &[] as &[u8],
+                        };
+
+                        // Deserialize params (if any)
+                        #deserialize_params
+
+                        // Call user's stream method with context, raw streams, and params
+                        service.#rust_method(ctx, send, recv, #(#param_idents),*).await
                             .map_err(|e| zel_core::protocol::ResourceError::CallbackError(
                                 e.to_string()
                             ))?;
@@ -338,6 +452,12 @@ fn render_client_struct(service: &ServiceDescription) -> TokenStream2 {
         .map(|s| render_client_subscription(s, service_name, trait_name))
         .collect();
 
+    let client_streams: Vec<_> = service
+        .streams
+        .iter()
+        .map(|s| render_client_stream(s, service_name))
+        .collect();
+
     let subscription_streams: Vec<_> = service
         .subscriptions
         .iter()
@@ -361,6 +481,7 @@ fn render_client_struct(service: &ServiceDescription) -> TokenStream2 {
 
             #(#client_methods)*
             #(#client_subscriptions)*
+            #(#client_streams)*
         }
 
         #(#subscription_streams)*
@@ -460,6 +581,44 @@ fn render_client_subscription(
 
             let stream = self.client.subscribe(&self.service_name, #rpc_name, body).await?;
             Ok(#stream_name { inner: stream })
+        }
+    }
+}
+
+fn render_client_stream(stream: &StreamDescription, _service_name: &str) -> TokenStream2 {
+    let method_name = &stream.signature.sig.ident;
+    let rpc_name = &stream.rpc_name;
+    let params = &stream.params;
+    let param_idents: Vec<_> = params.iter().map(|p| &p.ident).collect();
+    let param_types: Vec<_> = params.iter().map(|p| &p.ty).collect();
+
+    let serialize_params = if params.is_empty() {
+        quote! {
+            let body = None;
+        }
+    } else if params.len() == 1 {
+        let ident = &param_idents[0];
+        quote! {
+            let body_vec = serde_json::to_vec(&#ident)
+                .map_err(|e| zel_core::protocol::ClientError::Serialization(e))?;
+            let body = Some(bytes::Bytes::from(body_vec));
+        }
+    } else {
+        quote! {
+            let params = (#(#param_idents),*);
+            let body_vec = serde_json::to_vec(&params)
+                .map_err(|e| zel_core::protocol::ClientError::Serialization(e))?;
+            let body = Some(bytes::Bytes::from(body_vec));
+        }
+    };
+
+    quote! {
+        pub async fn #method_name(&self, #(#param_idents: #param_types),*)
+            -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream), zel_core::protocol::ClientError>
+        {
+            #serialize_params
+
+            self.client.open_stream(&self.service_name, #rpc_name, body).await
         }
     }
 }

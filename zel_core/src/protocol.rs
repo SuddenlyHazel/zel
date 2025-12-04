@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 use iroh::{
     Endpoint,
-    endpoint::{Connection, SendStream},
+    endpoint::{Connection, RecvStream, SendStream},
 };
 use serde::{Deserialize, Serialize};
 use tokio_util::codec::{FramedWrite, LengthDelimitedCodec};
@@ -28,6 +28,7 @@ pub use extensions::Extensions;
 pub enum Body {
     Subscribe,
     Rpc(Bytes),
+    Stream(Bytes), // Request to open a raw bidirectional stream, with optional serialized parameters
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -90,6 +91,7 @@ pub struct RpcService<'a> {
 pub enum ResourceCallback {
     Rpc(Rpc),
     SubscriptionProducer(Subscription),
+    StreamHandler(StreamHandler),
 }
 
 #[derive(thiserror::Error, Debug, Serialize, Deserialize)]
@@ -112,6 +114,7 @@ impl Debug for ResourceCallback {
         match self {
             Self::Rpc(_) => f.debug_tuple("Rpc").finish(),
             Self::SubscriptionProducer(_) => f.debug_tuple("SubscriptionProducer").finish(),
+            Self::StreamHandler(_) => f.debug_tuple("StreamHandler").finish(),
         }
     }
 }
@@ -129,6 +132,23 @@ pub type Subscription = Arc<
             Request,
             FramedWrite<SendStream, LengthDelimitedCodec>,
         ) -> BoxFuture<'static, ResourceResponse>,
+>;
+
+/// Handler for raw bidirectional stream endpoints.
+///
+/// Unlike RPC and Subscription handlers which work with framed/codec-wrapped streams,
+/// StreamHandlers receive raw Iroh SendStream and RecvStream for maximum flexibility.
+/// This enables custom protocols for video/audio streaming, file transfers, etc.
+///
+/// The handler receives:
+/// - RequestContext with full middleware and extension support
+/// - Request containing service/resource info and optional parameters
+/// - Raw SendStream for sending bytes
+/// - Raw RecvStream for receiving bytes
+pub type StreamHandler = Arc<
+    dyn Send
+        + Sync
+        + Fn(RequestContext, Request, SendStream, RecvStream) -> BoxFuture<'static, ResourceResponse>,
 >;
 
 /// Hook called when a new connection is established.
@@ -488,6 +508,31 @@ impl<'a> ServiceBuilder<'a> {
             name,
             ResourceCallback::SubscriptionProducer(Arc::new(callback)),
         );
+        self
+    }
+
+    /// Add a raw stream resource to this service
+    ///
+    /// Stream resources receive raw Iroh SendStream and RecvStream for implementing
+    /// custom protocols (video/audio streaming, file transfers, etc.)
+    ///
+    /// # Arguments
+    /// * `name` - The resource name
+    /// * `callback` - The stream callback function receiving raw streams
+    pub fn stream_resource<F>(mut self, name: &'a str, callback: F) -> Self
+    where
+        F: Fn(
+                RequestContext,
+                Request,
+                SendStream,
+                RecvStream,
+            ) -> BoxFuture<'static, ResourceResponse>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.resources
+            .insert(name, ResourceCallback::StreamHandler(Arc::new(callback)));
         self
     }
 

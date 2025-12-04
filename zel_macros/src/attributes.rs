@@ -51,6 +51,12 @@ pub struct SubscriptionAttr {
     pub item: Option<syn::Type>,
 }
 
+/// Stream attribute: #[stream(name = "...")]
+#[derive(Debug, Clone)]
+pub struct StreamAttr {
+    pub name: String,
+}
+
 /// Parse method or subscription attributes from a method
 pub fn parse_method_attr(attrs: &[Attribute]) -> syn::Result<Option<MethodAttr>> {
     for attr in attrs {
@@ -68,6 +74,17 @@ pub fn parse_subscription_attr(attrs: &[Attribute]) -> syn::Result<Option<Subscr
         if attr.path().is_ident("subscription") {
             return attr
                 .parse_args::<SubscriptionAttrParser>()
+                .map(|p| Some(p.into()));
+        }
+    }
+    Ok(None)
+}
+
+pub fn parse_stream_attr(attrs: &[Attribute]) -> syn::Result<Option<StreamAttr>> {
+    for attr in attrs {
+        if attr.path().is_ident("stream") {
+            return attr
+                .parse_args::<StreamAttrParser>()
                 .map(|p| Some(p.into()));
         }
     }
@@ -151,5 +168,40 @@ impl From<SubscriptionAttrParser> for SubscriptionAttr {
             name: p.name,
             item: p.item,
         }
+    }
+}
+
+struct StreamAttrParser {
+    name: String,
+}
+
+impl Parse for StreamAttrParser {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let mut name = None;
+
+        while !input.is_empty() {
+            let key: syn::Ident = input.parse()?;
+            input.parse::<Token![=]>()?;
+            let value: Lit = input.parse()?;
+
+            if key == "name" {
+                if let Lit::Str(s) = value {
+                    name = Some(s.value());
+                }
+            }
+
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+        }
+
+        name.ok_or_else(|| input.error("Missing 'name' attribute"))
+            .map(|name| StreamAttrParser { name })
+    }
+}
+
+impl From<StreamAttrParser> for StreamAttr {
+    fn from(p: StreamAttrParser) -> Self {
+        StreamAttr { name: p.name }
     }
 }

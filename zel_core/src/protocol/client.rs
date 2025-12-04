@@ -195,6 +195,74 @@ impl RpcClient {
         // Return SubscriptionStream
         Ok(SubscriptionStream { inner: sub_rx })
     }
+
+    /// Open a raw bidirectional stream for custom protocols
+    ///
+    /// This allows implementing custom protocols like video/audio streaming,
+    /// file transfers, etc. Returns raw Iroh streams with no framing/codec.
+    ///
+    /// # Arguments
+    /// * `service` - The service name
+    /// * `resource` - The resource name
+    /// * `params` - Optional serialized parameters
+    ///
+    /// # Returns
+    /// A tuple of (SendStream, RecvStream) for implementing custom protocols
+    pub async fn open_stream(
+        &self,
+        service: impl Into<String>,
+        resource: impl Into<String>,
+        params: Option<Bytes>,
+    ) -> Result<(iroh::endpoint::SendStream, RecvStream), ClientError> {
+        // Send stream request on shared bidi stream
+        let request = Request {
+            service: service.into(),
+            resource: resource.into(),
+            body: Body::Stream(params.unwrap_or_default()),
+        };
+
+        let request_bytes = serde_json::to_vec(&request)?;
+
+        {
+            let mut tx = self.tx.lock().await;
+            tx.send(request_bytes.into())
+                .await
+                .map_err(|e| ClientError::Connection(e.to_string()))?;
+        }
+
+        // Wait for Response (OK) on shared bidi stream
+        let response_bytes = {
+            let mut rx = self.rx.lock().await;
+            rx.next()
+                .await
+                .ok_or_else(|| ClientError::Protocol("No response received".into()))?
+                .map_err(|e| ClientError::Connection(e.to_string()))?
+        };
+
+        let response: Result<Response, ResourceError> = serde_json::from_slice(&response_bytes)?;
+        response.map_err(ClientError::Resource)?;
+
+        // Accept the new bidi stream opened by server
+        let (stream_tx, mut stream_rx) = self
+            .connection
+            .accept_bi()
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+
+        // Read the ACK byte that was sent to establish the stream
+        let mut ack = [0u8; 2];
+        stream_rx
+            .read_exact(&mut ack)
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+
+        if &ack != b"OK" {
+            return Err(ClientError::Protocol("Invalid stream ACK".into()));
+        }
+
+        // Return RAW streams (no codec wrapping)
+        Ok((stream_tx, stream_rx))
+    }
 }
 
 /// A stream of subscription messages
