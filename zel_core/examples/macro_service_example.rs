@@ -65,12 +65,12 @@ impl CalculatorServer for CalculatorImpl {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .filter(Some("iroh"), log::LevelFilter::Off)
-        .init();
+    // env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+    //     .filter(Some("iroh"), log::LevelFilter::Off)
+    //     .init();
 
     println!("╔════════════════════════════════════════╗");
-    println!("║  Zel Service Macro Example            ║");
+    println!("║       Zel Service Macro Example        ║");
     println!("╚════════════════════════════════════════╝\n");
 
     // Build server
