@@ -8,39 +8,39 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use sqlx::{Row, SqlitePool};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use zel_core::IrohBundle;
 use zel_core::protocol::{Extensions, RequestContext, RpcServerBuilder, zel_service};
 
+// Global trace ID counter
+static TRACE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 // ============================================================================
 // Server-Level Extensions (Shared Across ALL Connections)
 // ============================================================================
 
-/// Simulated database pool - shared across all connections
-#[derive(Clone)]
-struct DatabasePool {
-    connection_string: String,
-    max_connections: u32,
-}
+/// Real SQLite database pool - shared across all connections
+type DatabasePool = SqlitePool;
 
-impl DatabasePool {
-    fn new(connection_string: impl Into<String>) -> Self {
-        Self {
-            connection_string: connection_string.into(),
-            max_connections: 10,
-        }
-    }
+async fn init_database(pool: &SqlitePool) -> anyhow::Result<()> {
+    // Create users table
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
 
-    async fn query(&self, sql: &str) -> Result<String, String> {
-        println!(
-            "📊 [DB] Executing query on {}: {}",
-            self.connection_string, sql
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        Ok(format!("Result from: {}", sql))
-    }
+    println!("[DB] Database initialized with users table");
+    Ok(())
 }
 
 /// Server configuration - shared across all connections
@@ -185,62 +185,62 @@ impl UserServiceServer for UserServiceImpl {
             .ok_or("Request counter not found")?;
 
         // Access CONNECTION extensions (per-connection session)
-        // Note: In a real implementation, you'd populate connection extensions in a custom
-        // connection handler. For this demo, we'll make it optional to show the pattern.
-        let session = ctx.connection_extensions().get::<UserSession>();
+        let session = ctx
+            .connection_extensions()
+            .get::<UserSession>()
+            .ok_or("User not authenticated")?;
 
-        // Check permissions if session exists
-        if let Some(ref s) = session {
-            if !s.has_permission("write") {
-                return Err("Insufficient permissions".to_string());
-            }
-            println!("  ✓ Authenticated as: {}", s.user_id);
-        } else {
-            println!("  ⚠️  No session (would require authentication in production)");
+        // Check permissions
+        if !session.has_permission("write") {
+            return Err("Insufficient permissions".to_string());
         }
 
-        // Access REQUEST extensions (per-request trace ID)
-        let trace_id = ctx.extensions().get::<TraceId>();
-        let timing = ctx.extensions().get::<RequestTiming>();
+        println!("  Authenticated as: {} (CONNECTION ext)", session.user_id);
+
+        // Access REQUEST extensions (per-request trace ID and timing)
+        let trace_id = ctx.extensions().get::<TraceId>().ok_or("No trace ID")?;
+        let timing = ctx.extensions().get::<RequestTiming>().ok_or("No timing")?;
+
+        let req_num = counter.increment();
 
         // Log the request with all context
         if config.enable_logging {
-            println!("\n🔵 CREATE USER REQUEST");
-            println!("  Trace ID: {:?}", trace_id.map(|t| t.0));
+            println!("\nCREATE USER REQUEST");
+            println!("  Trace ID: {} (REQUEST ext)", trace_id.0);
             println!("  Remote Peer: {}", ctx.remote_id());
-            if let Some(ref s) = session {
-                println!("  Session User: {}", s.user_id);
-            }
+            println!("  Session User: {} (CONNECTION ext)", session.user_id);
             println!("  User Name: {}", user.name);
-            println!("  Request #{}", counter.increment());
+            println!("  Global Request Count: {} (SERVER ext)", req_num);
         }
 
-        // Simulate database operation
-        let query = format!(
-            "INSERT INTO users (name, email) VALUES ('{}', '{}')",
-            user.name, user.email
-        );
-        let result = db_pool.query(&query).await?;
-        println!("  DB Result: {}", result);
+        // Insert user into database
+        let result = sqlx::query("INSERT INTO users (name, email) VALUES (?, ?)")
+            .bind(&user.name)
+            .bind(&user.email)
+            .execute(&*db_pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
-        // Log timing if available
-        if let Some(t) = timing {
-            println!("  Request Duration: {:?}", t.elapsed());
-        }
+        let user_id = result.last_insert_rowid();
+        println!("[DB] Inserted user with ID: {}", user_id);
+
+        // Log timing
+        println!("  Request Duration: {:?}", timing.elapsed());
 
         Ok(UserId {
-            id: format!("user_{}", counter.get()),
+            id: user_id.to_string(),
         })
     }
 
     async fn get_user(&self, ctx: RequestContext, user_id: String) -> Result<UserData, String> {
-        // Check authentication (optional in this demo)
-        let session = ctx.connection_extensions().get::<UserSession>();
+        // Check authentication
+        let session = ctx
+            .connection_extensions()
+            .get::<UserSession>()
+            .ok_or("Not authenticated")?;
 
-        if let Some(ref s) = session {
-            if !s.has_permission("read") {
-                return Err("Insufficient permissions".to_string());
-            }
+        if !session.has_permission("read") {
+            return Err("Insufficient permissions".to_string());
         }
 
         let db_pool = ctx
@@ -248,21 +248,38 @@ impl UserServiceServer for UserServiceImpl {
             .get::<DatabasePool>()
             .ok_or("Database pool not configured")?;
 
-        println!("\n🟢 GET USER REQUEST");
+        let counter = ctx
+            .server_extensions()
+            .get::<Arc<RequestCounter>>()
+            .ok_or("Request counter not found")?;
+
+        let trace_id = ctx.extensions().get::<TraceId>();
+        let req_num = counter.increment();
+
+        println!("\nGET USER REQUEST");
+        println!(
+            "  Trace ID: {} (REQUEST ext)",
+            trace_id.map(|t| t.0).unwrap_or(0)
+        );
         println!("  User ID: {}", user_id);
-        if let Some(ref s) = session {
-            println!("  Session User: {}", s.user_id);
-        }
+        println!("  Session User: {} (CONNECTION ext)", session.user_id);
         println!("  Remote Peer: {}", ctx.remote_id());
+        println!("  Global Request Count: {} (SERVER ext)", req_num);
 
-        let query = format!("SELECT * FROM users WHERE id = '{}'", user_id);
-        let result = db_pool.query(&query).await?;
-        println!("  DB Result: {}", result);
+        // Query user from database
+        let user_id_i64: i64 = user_id.parse().map_err(|_| "Invalid user ID")?;
+        let row = sqlx::query("SELECT name, email FROM users WHERE id = ?")
+            .bind(user_id_i64)
+            .fetch_one(&*db_pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
-        Ok(UserData {
-            name: "John Doe".to_string(),
-            email: "john@example.com".to_string(),
-        })
+        let name: String = row.get(0);
+        let email: String = row.get(1);
+
+        println!("[DB] Retrieved user: {} ({})", name, email);
+
+        Ok(UserData { name, email })
     }
 
     async fn get_stats(&self, ctx: RequestContext) -> Result<String, String> {
@@ -272,12 +289,17 @@ impl UserServiceServer for UserServiceImpl {
             .ok_or("Request counter not found")?;
 
         let session = ctx.connection_extensions().get::<UserSession>();
+        let req_num = counter.increment();
 
-        println!("\n📈 GET STATS REQUEST");
-        println!("  Total Requests: {}", counter.get());
+        println!("\nGET STATS REQUEST");
+        println!("  Total Requests So Far: {} (SERVER ext)", counter.get());
+        println!("  This Request Number: {} (SERVER ext)", req_num);
         if let Some(s) = session {
-            println!("  Session User: {}", s.user_id);
-            println!("  Session Age: {:?}", s.authenticated_at.elapsed());
+            println!("  Session User: {} (CONNECTION ext)", s.user_id);
+            println!(
+                "  Session Age: {:?} (CONNECTION ext)",
+                s.authenticated_at.elapsed()
+            );
         }
 
         Ok(format!("Total requests: {}", counter.get()))
@@ -291,15 +313,19 @@ impl UserServiceServer for UserServiceImpl {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     println!("╔════════════════════════════════════════════════════════╗");
-    println!("║   Context & Extensions Demo - Three-Tier System       ║");
+    println!("║   Context & Extensions Demo - Three-Tier System        ║");
     println!("╚════════════════════════════════════════════════════════╝\n");
 
     // ========================================================================
     // Setup Server Extensions (Shared Across ALL Connections)
     // ========================================================================
-    println!("🔧 Setting up server extensions...");
 
-    let db_pool = DatabasePool::new("postgresql://localhost:5432/mydb");
+    // Create an in-memory SQLite database pool
+    let db_pool = SqlitePool::connect("sqlite::memory:").await?;
+
+    // Initialize the database schema
+    init_database(&db_pool).await?;
+
     let config = Arc::new(ServerConfig {
         max_request_size: 1024 * 1024,
         enable_logging: true,
@@ -311,41 +337,61 @@ async fn main() -> anyhow::Result<()> {
         .with(config.clone())
         .with(counter.clone());
 
-    println!("  ✓ Database pool configured");
-    println!("  ✓ Server config loaded");
-    println!("  ✓ Request counter initialized\n");
-
     // ========================================================================
     // Build Server with Extensions
     // ========================================================================
     let mut server_bundle = IrohBundle::builder(None).await?;
 
     let user_service = UserServiceImpl;
+
+    // Add connection hook for authentication/session setup
     let server = RpcServerBuilder::new(b"user/1", server_bundle.endpoint().clone())
         .with_extensions(server_extensions)
+        .with_connection_hook(|conn, _server_ext| {
+            let remote_id = conn.remote_id();
+            Box::pin(async move {
+                // Simulate authentication - create a session for this connection
+                let user_id = format!("user_{}", &remote_id.to_string()[..8]);
+                let session = UserSession::new(user_id);
+                Ok(Extensions::new().with(session))
+            })
+        })
+        .with_request_middleware(|ctx| {
+            Box::pin(async move {
+                // Add trace ID and timing to every request
+                let trace_id = TraceId::new(TRACE_COUNTER.fetch_add(1, Ordering::SeqCst));
+                let timing = RequestTiming::new();
+                ctx.with_extension(trace_id).with_extension(timing)
+            })
+        })
         .service("user");
 
     let server = user_service.into_service_builder(server).build().build();
 
     let server_bundle = server_bundle.accept(b"user/1", server).finish().await;
-    println!("🚀 Server listening on ALPN: user/1");
-    println!("  Server ID: {}\n", server_bundle.endpoint.id());
 
     // ========================================================================
-    // Create Client
+    // Create Multiple Clients (to demonstrate connection isolation)
     // ========================================================================
-    let client_bundle = IrohBundle::builder(None).await?.finish().await;
+    let client1_bundle = IrohBundle::builder(None).await?.finish().await;
+    let client2_bundle = IrohBundle::builder(None).await?.finish().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let conn = client_bundle
+    let conn1 = client1_bundle
         .endpoint
         .connect(server_bundle.endpoint.id(), b"user/1")
         .await?;
 
-    let client = zel_core::protocol::client::RpcClient::new(conn).await?;
-    let user_client = UserServiceClient::new(client);
+    let conn2 = client2_bundle
+        .endpoint
+        .connect(server_bundle.endpoint.id(), b"user/1")
+        .await?;
 
-    println!("✅ Client connected\n");
+    let client1 = zel_core::protocol::client::RpcClient::new(conn1).await?;
+    let user_client1 = UserServiceClient::new(client1);
+
+    let client2 = zel_core::protocol::client::RpcClient::new(conn2).await?;
+    let user_client2 = UserServiceClient::new(client2);
 
     // ========================================================================
     // Demonstrate Extension Usage
@@ -355,41 +401,83 @@ async fn main() -> anyhow::Result<()> {
     println!("  Testing Three-Tier Extension System");
     println!("═══════════════════════════════════════════════════════\n");
 
-    // Create a user (this will use all three extension tiers)
-    let user = UserData {
+    // ========================================================================
+    // Client 1: Create user
+    // ========================================================================
+    println!("CLIENT 1: Creating user...");
+    let user1 = UserData {
         name: "Alice Smith".to_string(),
         email: "alice@example.com".to_string(),
     };
 
-    let user_id = user_client.create_user(user).await?;
-    println!("\n✅ User created: {}\n", user_id.id);
+    let user_id1 = user_client1.create_user(user1).await?;
+    println!("Client 1 created: {}\n", user_id1.id);
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Get user info
-    let user_data = user_client.get_user(user_id.id.clone()).await?;
+    // ========================================================================
+    // Client 2: Create different user (shows isolated connection extensions)
+    // ========================================================================
+    println!("CLIENT 2: Creating user...");
+    let user2 = UserData {
+        name: "Bob Jones".to_string(),
+        email: "bob@example.com".to_string(),
+    };
+
+    let user_id2 = user_client2.create_user(user2).await?;
+    println!("Client 2 created: {}\n", user_id2.id);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // ========================================================================
+    // Client 1: Get user (shows same session, different trace ID)
+    // ========================================================================
+    println!("CLIENT 1: Getting users...");
+    let user_data = user_client1.get_user(user_id1.id.clone()).await?;
     println!(
-        "\n✅ User retrieved: {} ({})\n",
+        "Client 1 retrieved: {} ({})\n",
+        user_data.name, user_data.email
+    );
+
+    let user_data = user_client1.get_user(user_id2.id.clone()).await?;
+    println!(
+        "Client 1 retrieved: {} ({})\n",
         user_data.name, user_data.email
     );
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Get server stats
-    let stats = user_client.get_stats().await?;
-    println!("\n✅ Server stats: {}\n", stats);
+    // ========================================================================
+    // Client 2: Get stats (shows different session, shared counter)
+    // ========================================================================
+    println!("CLIENT 2: Getting stats...");
+    let stats = user_client2.get_stats().await?;
+    println!("Client 2 stats: {}\n", stats);
 
     println!("\n═══════════════════════════════════════════════════════");
     println!("  Extension System Summary");
     println!("═══════════════════════════════════════════════════════");
-    println!("  📊 Server Extensions: Shared database pool & config");
-    println!("  👤 Connection Extensions: User session (simulated)");
-    println!("  🔍 Request Extensions: Trace IDs & timing (optional)");
-    println!("  📈 Total Requests Processed: {}", counter.get());
+    println!("\n  [SERVER Extensions] - Shared across ALL connections:");
+    println!("    • Request counter: {} total requests", counter.get());
+    println!("    • SQLite pool: Both clients used same database");
+    println!("    • See 'Global Request Count' incrementing 1→2→3→4→5");
+    println!("\n  [CONNECTION Extensions] - Isolated per connection:");
+    println!(
+        "    • Client 1: user_{}",
+        &client1_bundle.endpoint.id().to_string()[..8]
+    );
+    println!(
+        "    • Client 2: user_{}",
+        &client2_bundle.endpoint.id().to_string()[..8]
+    );
+    println!("    • See different 'Session User' values above");
+    println!("\n  [REQUEST Extensions] - Unique per request:");
+    println!("    • Trace IDs: 1 → 2 → 3 → 4 → 5 (one per request)");
+    println!("    • See 'Trace ID' incrementing in logs above");
     println!("═══════════════════════════════════════════════════════\n");
 
     server_bundle.shutdown(Duration::from_secs(1)).await?;
-    println!("✅ Server shut down successfully");
+    println!("Server shut down successfully");
 
     Ok(())
 }
