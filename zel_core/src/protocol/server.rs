@@ -3,6 +3,7 @@ use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use iroh::{endpoint::Connection, protocol::ProtocolHandler};
 use log::{trace, warn};
+use std::future::Future;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 use crate::protocol::{

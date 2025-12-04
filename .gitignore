@@ -1,3 +1,9 @@
+# Build artifacts
 /target
+Cargo.lock
+
+# External dependencies (if any)
 /external
+
+# Generated documentation
 /docs
