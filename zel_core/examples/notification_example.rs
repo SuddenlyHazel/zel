@@ -1,13 +1,13 @@
-//! Example demonstrating notifications (client-to-server streaming)
+//! Example of notifications (client-to-server streaming)
 //!
-//! This example shows how to use the notification feature where clients
-//! can push events to the server over time, with acknowledgments.
+//! Shows notification feature where clients push events to the server
+//! over time with acknowledgments.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use zel_core::protocol::{zel_service, RequestContext, RpcServerBuilder};
 use zel_core::IrohBundle;
-use zel_core::protocol::{RequestContext, RpcServerBuilder, zel_service};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum UserEvent {

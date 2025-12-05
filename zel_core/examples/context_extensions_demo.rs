@@ -1,19 +1,19 @@
-//! Comprehensive example demonstrating the three-tier extension system
+//! Example of three-tier extension system
 //!
-//! This example shows:
+//! Shows:
 //! - Server extensions: Shared across all connections (database pool, config)
 //! - Connection extensions: Per-connection state (authentication, session)
 //! - Request extensions: Per-request data (trace IDs, timing)
-//! - How to access and use extensions in RPC handlers
+//! - Accessing and using extensions in RPC handlers
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use zel_core::protocol::{zel_service, Extensions, RequestContext, RpcServerBuilder};
 use zel_core::IrohBundle;
-use zel_core::protocol::{Extensions, RequestContext, RpcServerBuilder, zel_service};
 
 // Global trace ID counter
 static TRACE_COUNTER: AtomicU64 = AtomicU64::new(1);

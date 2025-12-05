@@ -1,13 +1,13 @@
-//! Simple example demonstrating raw bidirectional stream support with macros
+//! Example of raw bidirectional stream support with macros
 //!
-//! This shows how to use the #[stream] attribute to create endpoints that
-//! receive raw Iroh streams for implementing custom protocols.
+//! Shows #[stream] attribute usage to create endpoints that receive
+//! raw Iroh streams for custom protocols.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use zel_core::protocol::{zel_service, RequestContext, RpcServerBuilder};
 use zel_core::IrohBundle;
-use zel_core::protocol::{RequestContext, RpcServerBuilder, zel_service};
 
 // ============================================================================
 // Service Definition (using macros)
