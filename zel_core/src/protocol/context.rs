@@ -1,3 +1,13 @@
+//! Request context providing access to connection metadata and extensions.
+//!
+//! [`RequestContext`] is passed to all service handlers and provides access to:
+//! - The underlying Iroh connection
+//! - Three-tier extension system (server/connection/request)
+//! - Remote peer information
+//! - Graceful shutdown notifications
+//!
+//! See [`RequestContext`] for usage examples.
+
 use super::Extensions;
 use iroh::endpoint::Connection;
 use iroh::PublicKey;

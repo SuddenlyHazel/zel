@@ -1,3 +1,20 @@
+//! RPC protocol implementation including server, client, and service definition.
+//!
+//! This module provides the core protocol types for building RPC services over Iroh.
+//! Most users will interact with [`RpcServerBuilder`] for servers and [`RpcClient`] for clients.
+//!
+//! # Key Types
+//!
+//! - [`RpcServerBuilder`] - Builds RPC servers with services
+//! - [`RpcClient`] - Makes RPC calls and manages subscriptions
+//! - [`RequestContext`] - Provides handlers access to connection info and extensions
+//! - [`zel_service`] - Macro for defining type-safe services
+//!
+//! # Service Definition
+//!
+//! Services are typically defined using the [`zel_service`] macro which generates
+//! server and client code automatically. See the [crate-level docs](crate) for examples.
+
 use std::sync::atomic::AtomicBool;
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
@@ -30,23 +47,34 @@ pub use extensions::Extensions;
 // Re-export shutdown types
 pub use shutdown::TaskTracker;
 
+/// Request body type indicating the endpoint type and optional parameters.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Body {
+    /// Subscription request (server-to-client streaming)
     Subscribe,
+    /// RPC method call with serialized parameters
     Rpc(Bytes),
-    Stream(Bytes), // Request to open a raw bidirectional stream, with optional serialized parameters
-    Notify(Bytes), // Request to establish notification stream (client-to-server streaming)
+    /// Raw bidirectional stream request with optional serialized parameters
+    Stream(Bytes),
+    /// Notification stream request (client-to-server streaming) with optional parameters
+    Notify(Bytes),
 }
 
+/// RPC request containing service name, resource name, and body.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
+    /// The service name to route to
     pub service: String,
+    /// The resource (method/subscription/etc) name within the service
     pub resource: String,
+    /// The request body indicating endpoint type and parameters
     pub body: Body,
 }
 
+/// RPC response containing serialized result data.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
+    /// Serialized response data
     pub data: Bytes,
 }
 
@@ -113,10 +141,18 @@ pub struct RpcService<'a> {
     resources: HashMap<&'a str, ResourceCallback>,
 }
 
+/// Handler function for different RPC endpoint types.
+///
+/// Each variant wraps a different handler type for the four endpoint patterns:
+/// methods (RPC), subscriptions, notifications, and raw streams.
 pub enum ResourceCallback {
+    /// Handler for request/response methods
     Rpc(Rpc),
+    /// Handler for server-to-client subscriptions
     SubscriptionProducer(Subscription),
+    /// Handler for client-to-server notifications
     NotificationConsumer(NotificationHandler),
+    /// Handler for bidirectional raw streams
     StreamHandler(StreamHandler),
 }
 
@@ -602,7 +638,59 @@ mod tests {
 // Builder Pattern
 // ============================================================================
 
-/// Builder for constructing an RpcServer with a fluent API
+/// Builder for constructing an RpcServer with a fluent API.
+///
+/// `RpcServerBuilder` provides a fluent interface for configuring RPC servers with
+/// services, middleware, connection hooks, and server-level extensions.
+///
+/// # Quick Start
+///
+/// ```rust,no_run
+/// use zel_core::protocol::{RpcServerBuilder, RequestContext};
+/// use zel_core::IrohBundle;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let mut bundle = IrohBundle::builder(None).await?;
+/// let endpoint = bundle.endpoint().clone();
+///
+/// // Build a server with a service
+/// let server = RpcServerBuilder::new(b"myapp/1", endpoint)
+///     .service("calculator")
+///         .rpc_resource("add", |ctx: RequestContext, req| {
+///             Box::pin(async move {
+///                 // Handle the request
+///                 Ok(zel_core::protocol::Response {
+///                     data: bytes::Bytes::from("result")
+///                 })
+///             })
+///         })
+///         .build()
+///     .build();
+///
+/// bundle.accept(b"myapp/1", server).finish().await;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Adding Services
+///
+/// Services are added using [`service()`](RpcServerBuilder::service), which returns a
+/// [`ServiceBuilder`] for defining resources (methods, subscriptions, notifications, streams).
+///
+/// Most users will prefer the [`zel_service`](crate::protocol::zel_service) macro which
+/// generates the service builder code automatically.
+///
+/// # Shutdown Support
+///
+/// - Use [`build()`](RpcServerBuilder::build) for simple cases
+/// - Use [`build_with_shutdown()`](RpcServerBuilder::build_with_shutdown) to get a [`ShutdownHandle`]
+///   that allows triggering graceful shutdown after the server has been moved into the router
+///
+/// # Extensions and Middleware
+///
+/// - [`with_extensions()`](RpcServerBuilder::with_extensions) - Add server-level extensions (shared across all connections)
+/// - [`with_connection_hook()`](RpcServerBuilder::with_connection_hook) - Set up per-connection state
+/// - [`with_request_middleware()`](RpcServerBuilder::with_request_middleware) - Add request-level middleware
 pub struct RpcServerBuilder<'a> {
     alpn: &'a [u8],
     endpoint: Endpoint,

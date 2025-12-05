@@ -105,8 +105,47 @@ impl Builder {
 
 /// A bundle containing an Iroh endpoint, router, and shutdown management.
 ///
-/// This struct manages the lifecycle of an Iroh networking stack, including
-/// graceful shutdown coordination with subscribers.
+/// `IrohBundle` manages the complete lifecycle of an Iroh networking stack,
+/// including endpoint configuration, protocol routing, and coordinated graceful shutdown.
+///
+/// # Quick Start
+///
+/// ```rust,no_run
+/// use zel_core::IrohBundle;
+/// use zel_core::protocol::RpcServerBuilder;
+/// use std::time::Duration;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// // Create and configure bundle
+/// let mut builder = IrohBundle::builder(None).await?;
+/// let endpoint = builder.endpoint().clone();
+///
+/// // Build and register server
+/// let server = RpcServerBuilder::new(b"myapp/1", endpoint).build();
+/// let bundle = builder.accept(b"myapp/1", server).finish().await;
+///
+/// println!("Server listening at: {}", bundle.endpoint.id());
+///
+/// // ... run your application ...
+///
+/// // Graceful shutdown
+/// bundle.shutdown(Duration::from_secs(30)).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # DNS Discovery
+///
+/// By default, `IrohBundle::builder()` configures the endpoint with n0 DNS discovery
+/// for peer-to-peer connectivity. The endpoint can be further customized through the
+/// [`Builder`] before calling [`Builder::finish()`].
+///
+/// # Shutdown Patterns
+///
+/// - Use [`shutdown()`](IrohBundle::shutdown) for simple cases - shuts down subscribers then the router
+/// - Use [`shutdown_with_handle()`](IrohBundle::shutdown_with_handle) when coordinating RPC server shutdown
+///
+/// See [`Builder::subscribe_shutdown()`] to receive shutdown notifications in your components.
 pub struct IrohBundle {
     /// The Iroh network endpoint.
     pub endpoint: Endpoint,

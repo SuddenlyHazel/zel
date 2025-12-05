@@ -8,7 +8,46 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 use crate::protocol::{Body, Request, ResourceError, Response, SubscriptionMsg};
 
-/// Client for making RPC calls and subscriptions over Iroh
+/// Client for making RPC calls and subscriptions over Iroh.
+///
+/// `RpcClient` provides low-level access to RPC endpoints. For services defined with
+/// the [`zel_service`](crate::protocol::zel_service) macro, use the generated typed
+/// client wrapper instead (e.g., `CalculatorClient`) for type safety and convenience.
+///
+/// # Quick Start
+///
+/// ```rust,no_run
+/// use zel_core::protocol::RpcClient;
+/// use bytes::Bytes;
+///
+/// # async fn example(connection: iroh::endpoint::Connection) -> Result<(), Box<dyn std::error::Error>> {
+/// // Create client from an Iroh connection
+/// let client = RpcClient::new(connection).await?;
+///
+/// // For macro-generated services, use the typed client:
+/// // let calculator = CalculatorClient::new(client);
+/// // let result = calculator.add(5, 3).await?;
+///
+/// // For manual usage, call endpoints directly:
+/// let params = serde_json::to_vec(&(5, 3))?;
+/// let response = client.call("math", "add", Bytes::from(params)).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # RPC Patterns
+///
+/// - [`call()`](RpcClient::call) - Request/response RPC
+/// - [`subscribe()`](RpcClient::subscribe) - Server-to-client streaming
+/// - [`notify()`](RpcClient::notify) - Client-to-server streaming
+/// - [`open_stream()`](RpcClient::open_stream) - Bidirectional custom protocol
+///
+/// # Typed Clients
+///
+/// The [`zel_service`](crate::protocol::zel_service) macro automatically generates
+/// typed client wrappers that provide a better API than calling these methods directly.
+/// See [`examples/macro_service_example.rs`](https://github.com/SuddenlyHazel/zel/blob/main/zel_core/examples/macro_service_example.rs)
+/// for a complete example.
 #[derive(Clone)]
 pub struct RpcClient {
     connection: Connection,
