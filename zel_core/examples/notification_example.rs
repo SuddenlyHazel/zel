@@ -99,9 +99,9 @@ impl AnalyticsServer for AnalyticsImpl {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .filter(Some("iroh"), log::LevelFilter::Off)
-        .init();
+    // env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+    //     .filter(Some("iroh"), log::LevelFilter::Off)
+    //     .init();
 
     println!("╔═════════════════════════════════════════╗");
     println!("║   Zel Notification Example              ║");
@@ -143,7 +143,15 @@ async fn main() -> anyhow::Result<()> {
 
     // Start notification stream
     let mut sender = analytics_client.user_events().await?;
-    println!("✓ Notification stream established\n");
+    println!("✓ Notification stream established");
+    
+    // Set high priority for this notification stream
+    // This ensures these analytics events get bandwidth preference when multiplexing
+    if let Err(e) = sender.send_stream().set_priority(15) {
+        log::warn!("Failed to set stream priority: {}", e);
+    } else {
+        println!("✓ Set notification stream priority to 15 (high priority for analytics)\n");
+    }
 
     println!("Sending user events:");
 

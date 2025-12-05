@@ -5,3 +5,6 @@ pub use iroh_helpers::{
 };
 
 pub mod protocol;
+
+// Re-export shutdown types for convenience
+pub use protocol::{ShutdownError, ShutdownHandle};

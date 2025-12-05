@@ -50,6 +50,15 @@ impl CalculatorServer for CalculatorImpl {
         interval_ms: u64,
     ) -> Result<(), String> {
         log::info!("counter subscription from peer: {}", ctx.remote_id());
+
+        // Set high priority for this subscription stream
+        // Higher priority streams get bandwidth preference when multiplexing
+        if let Err(e) = sink.stream().set_priority(10) {
+            log::warn!("Failed to set stream priority: {}", e);
+        } else {
+            log::info!("Set stream priority to 10 for counter subscription");
+        }
+
         let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
         let mut count = 0u64;
 

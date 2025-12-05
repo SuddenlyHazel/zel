@@ -1,18 +1,21 @@
+use std::sync::atomic::AtomicBool;
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use iroh::{
-    Endpoint,
     endpoint::{Connection, RecvStream, SendStream},
+    Endpoint,
 };
 use serde::{Deserialize, Serialize};
+use tokio::time::Duration;
 use tokio_util::codec::{FramedWrite, LengthDelimitedCodec};
 
 pub mod client;
 pub mod context;
 pub mod extensions;
 pub mod server;
+pub mod shutdown;
 
 // Re-export the procedural macro
 pub use zel_macros::zel_service;
@@ -23,6 +26,9 @@ pub use client::{ClientError, NotificationSender, RpcClient, SubscriptionStream}
 // Re-export new context types
 pub use context::RequestContext;
 pub use extensions::Extensions;
+
+// Re-export shutdown types
+pub use shutdown::TaskTracker;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Body {
@@ -49,16 +55,18 @@ pub enum SubscriptionMsg {
     Established { service: String, resource: String },
     Data(Bytes),
     Stopped,
+    ServerShutdown, // Server is shutting down gracefully
 }
 
 /// Messages for notification streams (client-to-server streaming)
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NotificationMsg {
     Established { service: String, resource: String },
-    Data(Bytes),   // Client sends data
-    Ack,           // Server acknowledges receipt
-    Error(String), // Server reports error
-    Completed,     // Client signals completion
+    Data(Bytes),    // Client sends data
+    Ack,            // Server acknowledges receipt
+    Error(String),  // Server reports error
+    Completed,      // Client signals completion
+    ServerShutdown, // Server is shutting down gracefully
 }
 
 // Lowest level
@@ -70,6 +78,11 @@ pub struct RpcServer<'a> {
     server_extensions: Extensions,
     connection_hook: Option<ConnectionHook>,
     request_middleware: Vec<RequestMiddleware>,
+
+    // Shutdown coordination
+    shutdown_signal: Arc<tokio::sync::Notify>,
+    is_shutting_down: Arc<AtomicBool>,
+    task_tracker: TaskTracker,
 }
 
 impl<'a> std::fmt::Debug for RpcServer<'a> {
@@ -253,6 +266,31 @@ impl SubscriptionSink {
 
         Ok(())
     }
+
+    /// Get a reference to the underlying SendStream
+    ///
+    /// This allows direct access to all SendStream methods like:
+    /// - `set_priority(i32)` - Set stream priority for multiplexing
+    /// - `priority()` - Get current priority
+    /// - `id()` - Get the stream ID
+    /// - `reset(VarInt)` - Abort the stream with an error code
+    /// - `stopped()` - Wait for peer acknowledgment
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use zel_core::protocol::SubscriptionSink;
+    /// # async fn example(mut sink: SubscriptionSink) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Set high priority for this subscription
+    /// sink.stream().set_priority(10)?;
+    ///
+    /// // Send data
+    /// sink.send(&"important data").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn stream(&self) -> &SendStream {
+        self.inner.get_ref()
+    }
 }
 
 /// Errors that can occur when sending subscription messages
@@ -309,6 +347,13 @@ impl NotificationSink {
 
         Ok(())
     }
+
+    /// Get a reference to the underlying SendStream
+    ///
+    /// This allows direct access to all SendStream methods for the acknowledgment stream.
+    pub fn stream(&self) -> &SendStream {
+        self.inner.get_ref()
+    }
 }
 
 /// Errors that can occur when handling notifications
@@ -328,6 +373,106 @@ pub enum NotificationError {
 
     #[error("Protocol error: {0}")]
     Protocol(String),
+}
+
+// ============================================================================
+// Shutdown Handle
+// ============================================================================
+
+/// Handle for triggering graceful shutdown of an RpcServer
+///
+/// This handle is obtained from [`RpcServerBuilder::build_with_shutdown()`] and allows
+/// you to trigger graceful shutdown even after the server has been moved into the router.
+///
+/// # Example
+/// ```no_run
+/// use std::time::Duration;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use zel_core::protocol::RpcServerBuilder;
+/// # let endpoint = iroh::Endpoint::builder().bind().await?;
+/// let (server, shutdown_handle) = RpcServerBuilder::new(b"my-protocol", endpoint)
+///     .build_with_shutdown();
+///
+/// // Register server with router (server is moved here)
+/// // router.accept(b"my-protocol", server);
+///
+/// // Later, trigger shutdown using the handle
+/// shutdown_handle.shutdown(Duration::from_secs(30)).await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone)]
+pub struct ShutdownHandle {
+    shutdown_signal: Arc<tokio::sync::Notify>,
+    is_shutting_down: Arc<AtomicBool>,
+    task_tracker: TaskTracker,
+}
+
+impl ShutdownHandle {
+    /// Trigger graceful shutdown of the RPC server
+    ///
+    /// This will:
+    /// 1. Stop accepting new connections
+    /// 2. Wait for active operations to complete (or timeout)
+    /// 3. Return when all tasks finish or timeout is reached
+    pub async fn shutdown(self, timeout: Duration) -> Result<(), ShutdownError> {
+        use std::sync::atomic::Ordering;
+
+        log::info!(
+            "RpcServer shutdown initiated via handle, timeout: {:?}",
+            timeout
+        );
+
+        // Signal shutdown
+        self.is_shutting_down.store(true, Ordering::Relaxed);
+        self.shutdown_signal.notify_waiters();
+
+        log::debug!("Shutdown signal sent to all connection handlers");
+
+        // Wait for tasks to complete
+        let task_count_before = self.task_tracker.count();
+        log::debug!("Waiting for {} active tasks to complete", task_count_before);
+
+        match self.task_tracker.wait_for_completion(timeout).await {
+            Ok(()) => {
+                log::info!(
+                    "RpcServer shutdown complete - all {} tasks finished gracefully",
+                    task_count_before
+                );
+                Ok(())
+            }
+            Err(_) => {
+                let remaining = self.task_tracker.count();
+                log::warn!(
+                    "RpcServer shutdown timeout - {} of {} tasks still active after {:?}",
+                    remaining,
+                    task_count_before,
+                    timeout
+                );
+                Err(ShutdownError::Timeout {
+                    remaining_tasks: remaining,
+                    timeout,
+                })
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Shutdown Error
+// ============================================================================
+
+/// Errors that can occur during shutdown
+#[derive(thiserror::Error, Debug)]
+pub enum ShutdownError {
+    #[error("Shutdown timeout exceeded: {remaining_tasks} tasks still active after {timeout:?}")]
+    Timeout {
+        remaining_tasks: usize,
+        timeout: Duration,
+    },
+
+    #[error("Task join error: {0}")]
+    TaskJoinError(#[from] tokio::task::JoinError),
 }
 
 #[cfg(test)]
@@ -538,6 +683,130 @@ impl<'a> RpcServerBuilder<'a> {
             server_extensions: self.server_extensions,
             connection_hook: self.connection_hook,
             request_middleware: self.request_middleware,
+
+            // Initialize shutdown infrastructure
+            shutdown_signal: Arc::new(tokio::sync::Notify::new()),
+            is_shutting_down: Arc::new(AtomicBool::new(false)),
+            task_tracker: TaskTracker::new(),
+        }
+    }
+
+    /// Build the RpcServer and return a shutdown handle
+    ///
+    /// This is the preferred way to build a server if you need graceful shutdown support.
+    /// The shutdown handle can be used to trigger shutdown even after the server has been
+    /// moved into the router.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use std::time::Duration;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use zel_core::protocol::RpcServerBuilder;
+    /// # let endpoint = iroh::Endpoint::builder().bind().await?;
+    /// let (server, shutdown_handle) = RpcServerBuilder::new(b"my-protocol", endpoint)
+    ///     .build_with_shutdown();
+    ///
+    /// // Register server with router
+    /// // router.accept(b"my-protocol", server);
+    ///
+    /// // Later...
+    /// shutdown_handle.shutdown(Duration::from_secs(30)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn build_with_shutdown(self) -> (RpcServer<'a>, ShutdownHandle) {
+        let shutdown_signal = Arc::new(tokio::sync::Notify::new());
+        let is_shutting_down = Arc::new(AtomicBool::new(false));
+        let task_tracker = TaskTracker::new();
+
+        let handle = ShutdownHandle {
+            shutdown_signal: Arc::clone(&shutdown_signal),
+            is_shutting_down: Arc::clone(&is_shutting_down),
+            task_tracker: task_tracker.clone(),
+        };
+
+        let server = RpcServer {
+            alpn: self.alpn,
+            endpoint: self.endpoint,
+            services: Arc::new(self.services),
+            server_extensions: self.server_extensions,
+            connection_hook: self.connection_hook,
+            request_middleware: self.request_middleware,
+            shutdown_signal,
+            is_shutting_down,
+            task_tracker,
+        };
+
+        (server, handle)
+    }
+}
+
+// ============================================================================
+// Shutdown Method
+// ============================================================================
+
+impl<'a> RpcServer<'a> {
+    /// Initiate graceful shutdown of the RPC server
+    ///
+    /// This method:
+    /// 1. Stops accepting new connections immediately
+    /// 2. Waits for inflight operations to complete (or timeout)
+    /// 3. Returns when all tasks have completed or timeout is reached
+    ///
+    /// # Arguments
+    /// * `timeout` - Maximum duration to wait for inflight operations
+    ///
+    /// # Returns
+    /// * `Ok(())` if shutdown completed successfully
+    /// * `Err(ShutdownError::Timeout)` if timeout was reached with active tasks
+    ///
+    /// # Example
+    /// ```no_run
+    /// use std::time::Duration;
+    /// # use zel_core::protocol::RpcServerBuilder;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let endpoint = iroh::Endpoint::builder().bind().await?;
+    /// let server = RpcServerBuilder::new(b"my-protocol", endpoint).build();
+    /// server.shutdown(Duration::from_secs(30)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn shutdown(self, timeout: Duration) -> Result<(), ShutdownError> {
+        use std::sync::atomic::Ordering;
+
+        log::info!("RpcServer shutdown initiated, timeout: {:?}", timeout);
+
+        // 1. Signal all connection handlers to stop accepting new connections
+        self.is_shutting_down.store(true, Ordering::Relaxed);
+        self.shutdown_signal.notify_waiters();
+
+        log::debug!("Shutdown signal sent to all connection handlers");
+
+        // 2. Wait for all active tasks to complete (or timeout)
+        let task_count_before = self.task_tracker.count();
+        log::debug!("Waiting for {} active tasks to complete", task_count_before);
+
+        match self.task_tracker.wait_for_completion(timeout).await {
+            Ok(()) => {
+                log::info!(
+                    "RpcServer shutdown complete - all {} tasks finished gracefully",
+                    task_count_before
+                );
+                Ok(())
+            }
+            Err(_) => {
+                let remaining = self.task_tracker.count();
+                log::warn!(
+                    "RpcServer shutdown timeout - {} of {} tasks still active after {:?}",
+                    remaining,
+                    task_count_before,
+                    timeout
+                );
+                Err(ShutdownError::Timeout {
+                    remaining_tasks: remaining,
+                    timeout,
+                })
+            }
         }
     }
 }

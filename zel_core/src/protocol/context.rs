@@ -1,6 +1,7 @@
 use super::Extensions;
-use iroh::PublicKey;
 use iroh::endpoint::Connection;
+use iroh::PublicKey;
+use std::sync::Arc;
 
 /// Context provided to each RPC and subscription handler.
 ///
@@ -8,6 +9,9 @@ use iroh::endpoint::Connection;
 /// - Server extensions: Shared across all connections
 /// - Connection extensions: Scoped to a single connection
 /// - Request extensions: Unique per request
+///
+/// Additionally, handlers can monitor for graceful shutdown notifications to
+/// cleanly exit loops, flush pending data, and release resources.
 ///
 /// This allows handlers to access shared resources (like database pools),
 /// connection-specific state (like authentication sessions), and request-specific
@@ -20,6 +24,7 @@ pub struct RequestContext {
     server_extensions: Extensions,
     connection_extensions: Extensions,
     request_extensions: Extensions,
+    shutdown_signal: Arc<tokio::sync::Notify>,
 }
 
 impl RequestContext {
@@ -32,6 +37,7 @@ impl RequestContext {
         resource: String,
         server_extensions: Extensions,
         connection_extensions: Extensions,
+        shutdown_signal: Arc<tokio::sync::Notify>,
     ) -> Self {
         Self {
             connection,
@@ -40,6 +46,7 @@ impl RequestContext {
             server_extensions,
             connection_extensions,
             request_extensions: Extensions::new(),
+            shutdown_signal,
         }
     }
 
@@ -90,6 +97,27 @@ impl RequestContext {
     pub fn with_extension<T: Send + Sync + 'static>(mut self, value: T) -> Self {
         self.request_extensions = self.request_extensions.with(value);
         self
+    }
+
+    /// Wait for shutdown notification (async).
+    ///
+    /// Use this in `tokio::select!` to react to graceful shutdown:
+    ///
+    /// ```rust,ignore
+    /// loop {
+    ///     tokio::select! {
+    ///         _ = interval.tick() => {
+    ///             // Normal operation
+    ///         }
+    ///         _ = ctx.shutdown_notified() => {
+    ///             log::info!("Shutdown detected, exiting cleanly");
+    ///             break;
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    pub async fn shutdown_notified(&self) {
+        self.shutdown_signal.notified().await
     }
 }
 
