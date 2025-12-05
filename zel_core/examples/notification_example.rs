@@ -144,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
     // Start notification stream
     let mut sender = analytics_client.user_events().await?;
     println!("✓ Notification stream established");
-    
+
     // Set high priority for this notification stream
     // This ensures these analytics events get bandwidth preference when multiplexing
     if let Err(e) = sender.send_stream().set_priority(15) {
