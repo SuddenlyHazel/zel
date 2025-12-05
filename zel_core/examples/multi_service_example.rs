@@ -1,17 +1,17 @@
-//! Example demonstrating multiple services on a single RPC server
+//! Example of multiple services on a single RPC server
 //!
-//! This example shows:
-//! - How to define multiple services using #[zel_service]
-//! - How to register multiple services with RpcServerBuilder
-//! - How clients can access different services
-//! - The Server → Service → Resource hierarchy
+//! Shows:
+//! - Defining multiple services using #[zel_service]
+//! - Registering multiple services with RpcServerBuilder
+//! - Client access to different services
+//! - Server → Service → Resource hierarchy
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use zel_core::IrohBundle;
 use zel_core::protocol::RequestContext;
-use zel_core::protocol::{RpcServerBuilder, zel_service};
+use zel_core::protocol::{zel_service, RpcServerBuilder};
+use zel_core::IrohBundle;
 
 // ============================================================================
 // Service 1: Calculator

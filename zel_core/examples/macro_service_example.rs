@@ -1,10 +1,10 @@
-//! Example demonstrating the zel_service macro
+//! Example of zel_service macro
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use zel_core::protocol::{zel_service, RequestContext, RpcServerBuilder};
 use zel_core::IrohBundle;
-use zel_core::protocol::{RequestContext, RpcServerBuilder, zel_service};
 
 #[derive(Serialize, Deserialize)]
 pub struct CounterMsg {

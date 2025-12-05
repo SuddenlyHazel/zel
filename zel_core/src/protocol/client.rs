@@ -1,11 +1,9 @@
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures::{SinkExt, Stream, StreamExt};
 use iroh::endpoint::{Connection, RecvStream};
-use tokio::sync::Mutex;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 use crate::protocol::{Body, Request, ResourceError, Response, SubscriptionMsg};
@@ -14,8 +12,6 @@ use crate::protocol::{Body, Request, ResourceError, Response, SubscriptionMsg};
 #[derive(Clone)]
 pub struct RpcClient {
     connection: Connection,
-    tx: Arc<Mutex<FramedWrite<iroh::endpoint::SendStream, LengthDelimitedCodec>>>,
-    rx: Arc<Mutex<FramedRead<iroh::endpoint::RecvStream, LengthDelimitedCodec>>>,
 }
 
 /// Errors that can occur during client operations
@@ -39,23 +35,8 @@ pub enum ClientError {
 
 impl RpcClient {
     /// Create a new RPC client from an Iroh connection
-    ///
-    /// This opens a bidirectional stream that will be reused for all RPC calls
-    /// and subscription requests.
     pub async fn new(connection: Connection) -> Result<Self, ClientError> {
-        // Open the persistent bidi stream
-        let (tx, rx) = connection
-            .open_bi()
-            .await
-            .map_err(|e| ClientError::Connection(e.to_string()))?;
-
-        let tx = Arc::new(Mutex::new(FramedWrite::new(
-            tx,
-            LengthDelimitedCodec::new(),
-        )));
-        let rx = Arc::new(Mutex::new(FramedRead::new(rx, LengthDelimitedCodec::new())));
-
-        Ok(Self { connection, tx, rx })
+        Ok(Self { connection })
     }
 
     /// Call an RPC resource
@@ -73,7 +54,17 @@ impl RpcClient {
         resource: impl Into<String>,
         body: Bytes,
     ) -> Result<Response, ClientError> {
-        // Send request on shared bidi stream
+        // Open dedicated stream for THIS RPC
+        let (tx, rx) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+
+        let mut tx = FramedWrite::new(tx, LengthDelimitedCodec::new());
+        let mut rx = FramedRead::new(rx, LengthDelimitedCodec::new());
+
+        // Send request
         let request = Request {
             service: service.into(),
             resource: resource.into(),
@@ -81,22 +72,16 @@ impl RpcClient {
         };
 
         let request_bytes = serde_json::to_vec(&request)?;
+        tx.send(request_bytes.into())
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
 
-        {
-            let mut tx = self.tx.lock().await;
-            tx.send(request_bytes.into())
-                .await
-                .map_err(|e| ClientError::Connection(e.to_string()))?;
-        }
-
-        // Receive response on shared bidi stream
-        let response_bytes = {
-            let mut rx = self.rx.lock().await;
-            rx.next()
-                .await
-                .ok_or_else(|| ClientError::Protocol("No response received".into()))?
-                .map_err(|e| ClientError::Connection(e.to_string()))?
-        };
+        // Receive response
+        let response_bytes = rx
+            .next()
+            .await
+            .ok_or_else(|| ClientError::Protocol("No response received".into()))?
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
 
         let response: Result<Response, ResourceError> = serde_json::from_slice(&response_bytes)?;
 
@@ -124,7 +109,17 @@ impl RpcClient {
         let service = service.into();
         let resource = resource.into();
 
-        // Send subscribe request on shared bidi stream
+        // Open dedicated stream for THIS subscription request
+        let (tx, rx) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+
+        let mut tx = FramedWrite::new(tx, LengthDelimitedCodec::new());
+        let mut rx = FramedRead::new(rx, LengthDelimitedCodec::new());
+
+        // Send subscribe request
         let request = Request {
             service: service.clone(),
             resource: resource.clone(),
@@ -135,22 +130,16 @@ impl RpcClient {
         };
 
         let request_bytes = serde_json::to_vec(&request)?;
+        tx.send(request_bytes.into())
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
 
-        {
-            let mut tx = self.tx.lock().await;
-            tx.send(request_bytes.into())
-                .await
-                .map_err(|e| ClientError::Connection(e.to_string()))?;
-        }
-
-        // Wait for Response (OK) on shared bidi stream
-        let response_bytes = {
-            let mut rx = self.rx.lock().await;
-            rx.next()
-                .await
-                .ok_or_else(|| ClientError::Protocol("No response received".into()))?
-                .map_err(|e| ClientError::Connection(e.to_string()))?
-        };
+        // Wait for Response (OK)
+        let response_bytes = rx
+            .next()
+            .await
+            .ok_or_else(|| ClientError::Protocol("No response received".into()))?
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
 
         let response: Result<Response, ResourceError> = serde_json::from_slice(&response_bytes)?;
         response.map_err(ClientError::Resource)?;
@@ -217,7 +206,17 @@ impl RpcClient {
         let service = service.into();
         let resource = resource.into();
 
-        // Send notification request on shared bidi stream
+        // Open dedicated stream for THIS notification request
+        let (tx, rx) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+
+        let mut tx = FramedWrite::new(tx, LengthDelimitedCodec::new());
+        let mut rx = FramedRead::new(rx, LengthDelimitedCodec::new());
+
+        // Send notification request
         let request = Request {
             service: service.clone(),
             resource: resource.clone(),
@@ -225,22 +224,16 @@ impl RpcClient {
         };
 
         let request_bytes = serde_json::to_vec(&request)?;
+        tx.send(request_bytes.into())
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
 
-        {
-            let mut tx = self.tx.lock().await;
-            tx.send(request_bytes.into())
-                .await
-                .map_err(|e| ClientError::Connection(e.to_string()))?;
-        }
-
-        // Wait for Response (OK) on shared bidi stream
-        let response_bytes = {
-            let mut rx = self.rx.lock().await;
-            rx.next()
-                .await
-                .ok_or_else(|| ClientError::Protocol("No response received".into()))?
-                .map_err(|e| ClientError::Connection(e.to_string()))?
-        };
+        // Wait for Response (OK)
+        let response_bytes = rx
+            .next()
+            .await
+            .ok_or_else(|| ClientError::Protocol("No response received".into()))?
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
 
         let response: Result<Response, ResourceError> = serde_json::from_slice(&response_bytes)?;
         response.map_err(ClientError::Resource)?;
@@ -309,7 +302,17 @@ impl RpcClient {
         resource: impl Into<String>,
         params: Option<Bytes>,
     ) -> Result<(iroh::endpoint::SendStream, RecvStream), ClientError> {
-        // Send stream request on shared bidi stream
+        // Open dedicated stream for THIS stream request
+        let (tx, rx) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+
+        let mut tx = FramedWrite::new(tx, LengthDelimitedCodec::new());
+        let mut rx = FramedRead::new(rx, LengthDelimitedCodec::new());
+
+        // Send stream request
         let request = Request {
             service: service.into(),
             resource: resource.into(),
@@ -317,22 +320,16 @@ impl RpcClient {
         };
 
         let request_bytes = serde_json::to_vec(&request)?;
+        tx.send(request_bytes.into())
+            .await
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
 
-        {
-            let mut tx = self.tx.lock().await;
-            tx.send(request_bytes.into())
-                .await
-                .map_err(|e| ClientError::Connection(e.to_string()))?;
-        }
-
-        // Wait for Response (OK) on shared bidi stream
-        let response_bytes = {
-            let mut rx = self.rx.lock().await;
-            rx.next()
-                .await
-                .ok_or_else(|| ClientError::Protocol("No response received".into()))?
-                .map_err(|e| ClientError::Connection(e.to_string()))?
-        };
+        // Wait for Response (OK)
+        let response_bytes = rx
+            .next()
+            .await
+            .ok_or_else(|| ClientError::Protocol("No response received".into()))?
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
 
         let response: Result<Response, ResourceError> = serde_json::from_slice(&response_bytes)?;
         response.map_err(ClientError::Resource)?;

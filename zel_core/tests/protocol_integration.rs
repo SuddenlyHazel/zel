@@ -1,11 +1,11 @@
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use std::time::Duration;
-use zel_core::IrohBundle;
 use zel_core::protocol::{
-    Body, ResourceError, Response, RpcServerBuilder, SubscriptionMsg,
     client::{ClientError, RpcClient},
+    Body, ResourceError, Response, RpcServerBuilder, SubscriptionMsg,
 };
+use zel_core::IrohBundle;
 
 #[tokio::test]
 async fn test_basic_rpc_call() {
@@ -161,7 +161,6 @@ async fn test_multiple_concurrent_subscriptions() {
 
     // Setup client
     let client_bundle = IrohBundle::builder(None).await.unwrap().finish().await;
-
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let conn = client_bundle
@@ -266,6 +265,7 @@ async fn test_error_handling_resource_not_found() {
         .build();
 
     let server_bundle = server_bundle.accept(b"test-err2/1", server).finish().await;
+
     let client_bundle = IrohBundle::builder(None).await.unwrap().finish().await;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -301,8 +301,8 @@ async fn test_error_handling_resource_not_found() {
 #[tokio::test]
 async fn test_client_drop_unsubscribe() {
     use std::sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     };
 
     let completed = Arc::new(AtomicBool::new(false));
@@ -341,6 +341,7 @@ async fn test_client_drop_unsubscribe() {
         .build();
 
     let server_bundle = server_bundle.accept(b"test-drop/1", server).finish().await;
+
     let client_bundle = IrohBundle::builder(None).await.unwrap().finish().await;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -383,8 +384,8 @@ async fn test_client_drop_unsubscribe() {
 #[tokio::test]
 async fn test_multiple_clients_concurrent_calls() {
     use std::sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     };
 
     let call_count = Arc::new(AtomicUsize::new(0));
