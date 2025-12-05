@@ -45,6 +45,8 @@ impl ProtocolHandler for super::RpcServer<'static> {
     }
 }
 
+// Primary event loop for a single established connection. Waits for new stream requests and dispatches them upwards.
+// TODO - This seems like a good place to be lifting up a graceful shutdown handler
 async fn connection_handler(
     service_map: ServiceMap<'static>,
     server_extensions: Extensions,
@@ -76,6 +78,7 @@ async fn connection_handler(
     };
 
     // Loop: accept streams and spawn handlers
+    // TODO: Whats the actual overhead of keeping a connection alive? Should we kick peers that connect and never do anything?
     loop {
         let stream_result = connection.accept_bi().await;
 

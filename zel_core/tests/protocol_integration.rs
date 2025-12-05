@@ -471,3 +471,106 @@ async fn test_multiple_clients_concurrent_calls() {
         .await
         .unwrap();
 }
+
+/// This test validates the critical claim in Extensions::with():
+///
+/// Extensions internally stores data as: Arc<HashMap<TypeId, Arc<dyn Any>>>
+///                                       ^outer Arc    ^HashMap  ^inner Arc for each value
+///
+/// When with() is called, it must:
+/// 1. Clone the HashMap itself (create a new HashMap) - NOT just clone the outer Arc
+/// 2. Clone the inner Arc pointers (share values efficiently) - NOT deep-copy values
+///
+/// This is achieved via: (*self.map).clone()
+///                       ^dereference outer Arc, then clone the HashMap
+///
+/// Some definitions, because this is a bit confusion:
+/// - Server Extensions: Shared across all connections (database pools, config)
+/// - Connection Extensions: Server extensions + per-connection state (sessions)
+/// - Request Extensions: Connection extensions + per-request data (trace IDs)
+#[test]
+fn test_extensions_with_clones_hashmap_not_arc() {
+    use std::sync::Arc;
+    use zel_core::protocol::Extensions;
+
+    // Simulate a database pool that would be in server extensions
+    #[derive(Clone)]
+    struct DbPool {
+        name: String,
+    }
+
+    // ========================================================================
+    // TEST 1: Server → Connection extension flow (separate HashMaps)
+    // ========================================================================
+    // Simulates: Server extensions are cloned, then connection-specific data is added
+
+    // Server extensions: shared database pool
+    let server_extensions = Extensions::new().with(DbPool {
+        name: "postgres".to_string(),
+    });
+
+    // Connection extensions: clone server extensions + add session
+    // This is what happens in connection hooks
+    let connection_extensions = server_extensions
+        .clone()
+        .with(String::from("user_session_abc"));
+
+    // Server extensions should NOT have the session
+    // (So, separate HashMaps for server vs connection tiers)
+    assert!(
+        !server_extensions.contains::<String>(),
+        "Server extensions should not have session - proves connection isolation"
+    );
+
+    // Connection extensions should have BOTH database pool and session
+    assert!(connection_extensions.contains::<DbPool>());
+    assert!(connection_extensions.contains::<String>());
+
+    // ========================================================================
+    // TEST 2: Shared values across tiers (Arc pointers cloned, not data)
+    // ========================================================================
+    // So, database pool is shared (not copied) from server → connection → request
+
+    // Server extensions with database pool
+    let server_exts = Extensions::new().with(DbPool {
+        name: "shared_pool".to_string(),
+    });
+
+    // Connection extensions: clone server + add connection data
+    let conn_exts = server_exts.clone().with(42u32); // connection ID
+
+    // Final stage (but at this point we can be sure it'll work the deeper we go)
+    // Request extensions: clone connection + add request data
+    let request_exts = conn_exts.clone().with(999u64); // trace ID
+
+    // Retrieve the database pool from all three tiers
+    let pool_from_server = server_exts.get::<DbPool>().unwrap();
+    let pool_from_conn = conn_exts.get::<DbPool>().unwrap();
+    let pool_from_request = request_exts.get::<DbPool>().unwrap();
+
+    // All three should point to the SAME Arc
+    // Yes, this is how an Arc works but I dont want to deal with headaches later..
+    assert!(
+        Arc::ptr_eq(&pool_from_server, &pool_from_conn),
+        "Server and connection should share same Arc"
+    );
+    assert!(
+        Arc::ptr_eq(&pool_from_conn, &pool_from_request),
+        "Connection and request should share same Arc"
+    );
+
+    // Trace ID should NOT propagate up to parent tiers
+    // So, we have tier isolation. Changes at request level don't affect connection/server
+    assert!(
+        !server_exts.contains::<u64>(),
+        "Server extensions should not have trace ID - proves upward isolation"
+    );
+    assert!(
+        !conn_exts.contains::<u64>(),
+        "Connection extensions should not have trace ID - proves upward isolation"
+    );
+    assert!(
+        request_exts.contains::<u64>(),
+        "Request extensions should have trace ID"
+    );
+}
