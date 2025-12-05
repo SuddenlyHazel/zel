@@ -1,10 +1,10 @@
 [package]
 name = "zel_core"
-version = "0.2.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Type-safe RPC framework built on Iroh with support for methods, subscriptions, notifications, and raw streams"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/SuddenlyHazel/zel"
+license.workspace = true
+repository.workspace = true
 keywords = ["rpc", "iroh", "async", "networking", "p2p"]
 categories = ["network-programming", "asynchronous"]
 readme = "../README.md"
