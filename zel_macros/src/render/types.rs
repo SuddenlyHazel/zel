@@ -115,6 +115,10 @@ pub fn render_typed_receiver(
                         zel_core::protocol::NotificationMsg::Completed => {
                             return None;
                         }
+                        zel_core::protocol::NotificationMsg::ServerShutdown => {
+                            // Server is shutting down gracefully
+                            return None;
+                        }
                         _ => {
                             // Ignore other message types
                             continue;
@@ -164,6 +168,10 @@ pub fn render_subscription_stream(
                         }
                     }
                     std::task::Poll::Ready(Some(Ok(zel_core::protocol::SubscriptionMsg::Stopped))) => {
+                        std::task::Poll::Ready(None)
+                    }
+                    std::task::Poll::Ready(Some(Ok(zel_core::protocol::SubscriptionMsg::ServerShutdown))) => {
+                        // Server is shutting down gracefully, close the stream
                         std::task::Poll::Ready(None)
                     }
                     std::task::Poll::Ready(Some(Ok(zel_core::protocol::SubscriptionMsg::Established { .. }))) => {

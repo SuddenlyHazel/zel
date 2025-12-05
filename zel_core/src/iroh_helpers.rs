@@ -1,8 +1,8 @@
 use iroh::{
-    Endpoint, SecretKey,
     discovery::dns::DnsDiscovery,
     endpoint::BindError,
     protocol::{DynProtocolHandler, Router, RouterBuilder},
+    Endpoint, SecretKey,
 };
 use log::warn;
 use std::time::Duration;
@@ -185,5 +185,60 @@ impl IrohBundle {
 
         // Router::shutdown closes the endpoint
         router.shutdown().await
+    }
+
+    /// Shutdown both RPC server and Iroh bundle in coordinated fashion
+    ///
+    /// This is a convenience method that coordinates shutdown of both the RPC server
+    /// (using a shutdown handle) and the Iroh bundle.
+    ///
+    /// **Note:** Use [`RpcServerBuilder::build_with_shutdown()`](crate::protocol::RpcServerBuilder::build_with_shutdown)
+    /// to get a shutdown handle that you can use after registering the server.
+    ///
+    /// # Arguments
+    /// * `shutdown_handle` - The shutdown handle from `build_with_shutdown()`
+    /// * `rpc_timeout` - Timeout for RPC server operations
+    /// * `bundle_timeout` - Timeout for bundle shutdown subscribers
+    ///
+    /// # Example
+    /// ```no_run
+    /// use std::time::Duration;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use zel_core::protocol::RpcServerBuilder;
+    /// let mut bundle_builder = zel_core::IrohBundle::builder(None).await?;
+    /// let endpoint = bundle_builder.endpoint().clone();
+    ///
+    /// // Build server with shutdown handle
+    /// let (server, shutdown_handle) = RpcServerBuilder::new(b"test", endpoint)
+    ///     .build_with_shutdown();
+    ///
+    /// // Register and finish
+    /// let bundle = bundle_builder.accept(b"test", server).finish().await;
+    ///
+    /// // Later, coordinate shutdown
+    /// bundle.shutdown_with_handle(
+    ///     shutdown_handle,
+    ///     Duration::from_secs(30),  // RPC timeout
+    ///     Duration::from_secs(10),  // Bundle timeout
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn shutdown_with_handle(
+        self,
+        shutdown_handle: crate::protocol::ShutdownHandle,
+        rpc_timeout: Duration,
+        bundle_timeout: Duration,
+    ) -> Result<(), anyhow::Error> {
+        // 1. Shutdown RPC server first (allow requests to complete)
+        log::info!("Shutting down RPC server...");
+        shutdown_handle.shutdown(rpc_timeout).await?;
+
+        // 2. Then shutdown IrohBundle (allow subscribers to cleanup)
+        log::info!("Shutting down Iroh bundle...");
+        self.shutdown(bundle_timeout).await?;
+
+        log::info!("Complete shutdown finished");
+        Ok(())
     }
 }

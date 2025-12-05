@@ -26,6 +26,10 @@ impl ProtocolHandler for super::RpcServer<'static> {
         let server_extensions = self.server_extensions.clone();
         let connection_hook = self.connection_hook.clone();
         let request_middleware = self.request_middleware.clone();
+        let shutdown_signal = self.shutdown_signal.clone();
+        let is_shutting_down = self.is_shutting_down.clone();
+        let task_tracker = self.task_tracker.clone();
+
         async move {
             tokio::spawn(async move {
                 if let Err(e) = connection_handler(
@@ -34,6 +38,9 @@ impl ProtocolHandler for super::RpcServer<'static> {
                     connection_hook,
                     request_middleware,
                     connection,
+                    shutdown_signal,
+                    is_shutting_down,
+                    task_tracker,
                 )
                 .await
                 {
@@ -46,14 +53,17 @@ impl ProtocolHandler for super::RpcServer<'static> {
 }
 
 // Primary event loop for a single established connection. Waits for new stream requests and dispatches them upwards.
-// TODO - This seems like a good place to be lifting up a graceful shutdown handler
 async fn connection_handler(
     service_map: ServiceMap<'static>,
     server_extensions: Extensions,
     connection_hook: Option<super::ConnectionHook>,
     request_middleware: Vec<super::RequestMiddleware>,
     connection: Connection,
+    shutdown_signal: std::sync::Arc<tokio::sync::Notify>,
+    is_shutting_down: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    task_tracker: super::shutdown::TaskTracker,
 ) -> anyhow::Result<()> {
+    use std::sync::atomic::Ordering;
     // Call connection hook to populate connection-scoped extensions
     let connection_extensions = if let Some(hook) = connection_hook {
         match hook(&connection, server_extensions.clone()).await {
@@ -78,35 +88,64 @@ async fn connection_handler(
     };
 
     // Loop: accept streams and spawn handlers
-    // TODO: Whats the actual overhead of keeping a connection alive? Should we kick peers that connect and never do anything?
     loop {
-        let stream_result = connection.accept_bi().await;
-
-        match stream_result {
-            Ok((tx, rx)) => {
-                // Spawn independent handler for THIS stream
-                let service_map = service_map.clone();
-                let server_ext = server_extensions.clone();
-                let conn_ext = connection_extensions.clone();
-                let middleware = request_middleware.clone();
-                let conn = connection.clone();
-                let conn_id = connection.remote_id();
-
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        handle_stream(tx, rx, service_map, server_ext, conn_ext, middleware, conn)
-                            .await
-                    {
-                        log::error!("Stream handler error for {}: {e}", conn_id);
-                    }
-                });
-            }
-            Err(e) => {
-                log::trace!(
-                    "Connection accept_bi failed for {}: {e}. Connection likely closed.",
+        tokio::select! {
+            // Shutdown signal received
+            _ = shutdown_signal.notified() => {
+                log::info!(
+                    "Shutdown signal received for connection {}, stopping accept loop",
                     connection.remote_id()
                 );
                 break;
+            }
+
+            // Normal stream acceptance
+            stream_result = connection.accept_bi() => {
+                // Double-check shutdown state before spawning
+                if is_shutting_down.load(Ordering::Relaxed) {
+                    log::trace!(
+                        "Rejecting new stream from {} during shutdown",
+                        connection.remote_id()
+                    );
+                    break;
+                }
+
+                match stream_result {
+                    Ok((tx, rx)) => {
+                        // Increment task counter and get guard
+                        let task_guard = task_tracker.increment();
+
+                        // Spawn independent handler for THIS stream
+                        let service_map = service_map.clone();
+                        let server_ext = server_extensions.clone();
+                        let conn_ext = connection_extensions.clone();
+                        let middleware = request_middleware.clone();
+                        let conn = connection.clone();
+                        let conn_id = connection.remote_id();
+
+                        let shutdown_sig = shutdown_signal.clone();
+
+                        tokio::spawn(async move {
+                            // Keep guard alive for the lifetime of this task
+                            let _guard = task_guard;
+
+                            if let Err(e) =
+                                handle_stream(tx, rx, service_map, server_ext, conn_ext, middleware, conn, shutdown_sig)
+                                    .await
+                            {
+                                log::error!("Stream handler error for {}: {e}", conn_id);
+                            }
+                            // Guard drops here, decrementing counter
+                        });
+                    }
+                    Err(e) => {
+                        log::trace!(
+                            "Connection accept_bi failed for {}: {e}. Connection likely closed.",
+                            connection.remote_id()
+                        );
+                        break;
+                    }
+                }
             }
         }
     }
@@ -122,6 +161,7 @@ async fn handle_stream(
     connection_extensions: Extensions,
     request_middleware: Vec<super::RequestMiddleware>,
     connection: Connection,
+    shutdown_signal: std::sync::Arc<tokio::sync::Notify>,
 ) -> anyhow::Result<()> {
     let mut tx = FramedWrite::new(tx, LengthDelimitedCodec::new());
     let mut rx = FramedRead::new(rx, LengthDelimitedCodec::new());
@@ -191,6 +231,7 @@ async fn handle_stream(
                 request.resource.clone(),
                 server_extensions.clone(),
                 connection_extensions.clone(),
+                shutdown_signal.clone(),
             );
 
             // Apply request middleware chain
@@ -275,6 +316,7 @@ async fn handle_stream(
             let server_ext_clone = server_extensions.clone();
             let conn_ext_clone = connection_extensions.clone();
             let middleware_clone = request_middleware.clone();
+            let shutdown_sig_clone = shutdown_signal.clone();
 
             tokio::spawn(async move {
                 let peer = conn_clone.remote_id();
@@ -286,6 +328,7 @@ async fn handle_stream(
                     request.resource.clone(),
                     server_ext_clone,
                     conn_ext_clone,
+                    shutdown_sig_clone,
                 );
 
                 // Apply request middleware chain
@@ -352,6 +395,7 @@ async fn handle_stream(
             let server_ext_clone = server_extensions.clone();
             let conn_ext_clone = connection_extensions.clone();
             let middleware_clone = request_middleware.clone();
+            let shutdown_sig_clone = shutdown_signal.clone();
 
             tokio::spawn(async move {
                 let peer = conn_clone.remote_id();
@@ -363,6 +407,7 @@ async fn handle_stream(
                     request.resource.clone(),
                     server_ext_clone,
                     conn_ext_clone,
+                    shutdown_sig_clone,
                 );
 
                 // Apply request middleware chain
@@ -419,6 +464,7 @@ async fn handle_stream(
             let server_ext_clone = server_extensions.clone();
             let conn_ext_clone = connection_extensions.clone();
             let middleware_clone = request_middleware.clone();
+            let shutdown_sig_clone = shutdown_signal.clone();
 
             tokio::spawn(async move {
                 let peer = conn_clone.remote_id();
@@ -430,6 +476,7 @@ async fn handle_stream(
                     request.resource.clone(),
                     server_ext_clone,
                     conn_ext_clone,
+                    shutdown_sig_clone,
                 );
 
                 // Apply request middleware chain
