@@ -42,7 +42,39 @@ pub type ShutdownListener = tokio::sync::oneshot::Receiver<ShutdownReplier>;
 /// A collection of shutdown notification senders.
 pub type ShutdownSubscribers = Vec<tokio::sync::oneshot::Sender<ShutdownReplier>>;
 
-/// A builder for configuring an [`IrohBundle`] with custom protocol handlers and shutdown subscribers.
+/// Builder for configuring an [`IrohBundle`] with protocol handlers and shutdown management.
+///
+/// Created via [`IrohBundle::builder()`]. Use this to register protocol handlers
+/// before calling [`finish()`](Builder::finish) to create the bundle.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use zel_core::IrohBundle;
+/// use zel_core::protocol::RpcServerBuilder;
+/// use std::time::Duration;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let mut builder = IrohBundle::builder(None).await?;
+/// let endpoint = builder.endpoint().clone();
+///
+/// // Register shutdown subscriber if needed
+/// let shutdown_rx = builder.subscribe_shutdown();
+///
+/// // Build and register server
+/// let server = RpcServerBuilder::new(b"myapp/1", endpoint).build();
+/// let bundle = builder.accept(b"myapp/1", server).finish().await;
+///
+/// // Later handle shutdown
+/// tokio::spawn(async move {
+///     if let Ok(replier) = shutdown_rx.await {
+///         // Cleanup...
+///         replier.complete().await;
+///     }
+/// });
+/// # Ok(())
+/// # }
+/// ```
 pub struct Builder {
     endpoint: Endpoint,
     router_builder: RouterBuilder,

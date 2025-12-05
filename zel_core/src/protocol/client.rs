@@ -396,7 +396,35 @@ impl RpcClient {
     }
 }
 
-/// A stream of subscription messages
+/// Stream for receiving server-to-client subscription data.
+///
+/// This is the **client-side** counterpart to the server's [`SubscriptionSink`](crate::protocol::SubscriptionSink).
+/// The client receives subscription data pushed by the server over time.
+///
+/// # Directionality
+///
+/// ```text
+/// Server ──[SubscriptionMsg]──> Client (SubscriptionStream)
+/// ```
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use futures::StreamExt;
+///
+/// let mut stream = client.subscribe("calculator", "counter", None).await?;
+///
+/// while let Some(msg) = stream.next().await {
+///     match msg? {
+///         SubscriptionMsg::Data(data) => {
+///             let count: u64 = serde_json::from_slice(&data)?;
+///             println!("Received: {}", count);
+///         }
+///         SubscriptionMsg::Stopped => break,
+///         _ => {}
+///     }
+/// }
+/// ```
 pub struct SubscriptionStream {
     inner: FramedRead<RecvStream, LengthDelimitedCodec>,
 }
@@ -450,7 +478,32 @@ impl Drop for SubscriptionStream {
     }
 }
 
-/// Client-side notification sender (client-to-server streaming)
+/// Sender for pushing client-to-server notification data.
+///
+/// This is the **client-side** counterpart to the server's notification handler.
+/// The client pushes data to the server and receives acknowledgments.
+///
+/// # Directionality
+///
+/// ```text
+/// Client (NotificationSender) ──[NotificationMsg::Data]──> Server
+/// Client <──[NotificationMsg::Ack]──────────────────────── Server
+/// ```
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let mut sender = client.notify("logs", "upload", None).await?;
+///
+/// // Send multiple messages
+/// sender.send(&"Starting process".to_string()).await?;
+/// sender.send(&"Process complete".to_string()).await?;
+///
+/// // Signal completion
+/// sender.complete().await?;
+/// ```
+///
+/// Each [`send()`](NotificationSender::send) waits for acknowledgment before returning.
 pub struct NotificationSender {
     tx: FramedWrite<iroh::endpoint::SendStream, LengthDelimitedCodec>,
     rx: FramedRead<RecvStream, LengthDelimitedCodec>,
