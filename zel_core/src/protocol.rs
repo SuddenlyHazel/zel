@@ -266,6 +266,31 @@ impl SubscriptionSink {
 
         Ok(())
     }
+
+    /// Get a reference to the underlying SendStream
+    ///
+    /// This allows direct access to all SendStream methods like:
+    /// - `set_priority(i32)` - Set stream priority for multiplexing
+    /// - `priority()` - Get current priority
+    /// - `id()` - Get the stream ID
+    /// - `reset(VarInt)` - Abort the stream with an error code
+    /// - `stopped()` - Wait for peer acknowledgment
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use zel_core::protocol::SubscriptionSink;
+    /// # async fn example(mut sink: SubscriptionSink) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Set high priority for this subscription
+    /// sink.stream().set_priority(10)?;
+    ///
+    /// // Send data
+    /// sink.send(&"important data").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn stream(&self) -> &SendStream {
+        self.inner.get_ref()
+    }
 }
 
 /// Errors that can occur when sending subscription messages
@@ -321,6 +346,13 @@ impl NotificationSink {
             .map_err(|e| NotificationError::Send(e.to_string()))?;
 
         Ok(())
+    }
+
+    /// Get a reference to the underlying SendStream
+    ///
+    /// This allows direct access to all SendStream methods for the acknowledgment stream.
+    pub fn stream(&self) -> &SendStream {
+        self.inner.get_ref()
     }
 }
 

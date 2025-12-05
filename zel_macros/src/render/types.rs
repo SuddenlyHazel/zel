@@ -43,6 +43,18 @@ pub fn render_typed_sink(sub: &SubscriptionDescription, trait_name: &syn::Ident)
             pub async fn close(self) -> Result<(), zel_core::protocol::SubscriptionError> {
                 self.inner.close().await
             }
+
+            /// Get a reference to the underlying SendStream
+            ///
+            /// This allows direct access to all SendStream methods like:
+            /// - `set_priority(i32)` - Set stream priority for multiplexing
+            /// - `priority()` - Get current priority
+            /// - `id()` - Get the stream ID
+            /// - `reset(VarInt)` - Abort the stream with an error code
+            /// - `stopped()` - Wait for peer acknowledgment
+            pub fn stream(&self) -> &iroh::endpoint::SendStream {
+                self.inner.stream()
+            }
         }
     }
 }
@@ -126,6 +138,24 @@ pub fn render_typed_receiver(
                     }
                 }
             }
+
+            /// Get a reference to the underlying RecvStream for receiving notifications
+            ///
+            /// This allows direct access to all RecvStream methods like:
+            /// - `id()` - Get the stream ID
+            /// - `stop(VarInt)` - Explicitly stop receiving
+            /// - `received_reset()` - Wait for client reset signal
+            /// - `is_0rtt()` - Check if this is a 0-RTT stream
+            pub fn recv_stream(&self) -> &iroh::endpoint::RecvStream {
+                self.inner.get_ref()
+            }
+
+            /// Get a reference to the underlying SendStream for sending acknowledgments
+            ///
+            /// This allows direct access to all SendStream methods.
+            pub fn send_stream(&self) -> &iroh::endpoint::SendStream {
+                self.sink.stream()
+            }
         }
     }
 }
@@ -147,6 +177,19 @@ pub fn render_subscription_stream(
     quote! {
         pub struct #stream_name {
             inner: zel_core::protocol::SubscriptionStream,
+        }
+
+        impl #stream_name {
+            /// Get a reference to the underlying RecvStream
+            ///
+            /// This allows direct access to all RecvStream methods like:
+            /// - `id()` - Get the stream ID
+            /// - `stop(VarInt)` - Explicitly stop receiving and notify server
+            /// - `received_reset()` - Wait for server reset signal
+            /// - `is_0rtt()` - Check if this is a 0-RTT stream
+            pub fn stream(&self) -> &iroh::endpoint::RecvStream {
+                self.inner.stream()
+            }
         }
 
         impl futures::Stream for #stream_name {
@@ -216,6 +259,16 @@ pub fn render_notification_sender(
 
             pub async fn complete(self) -> Result<(), zel_core::protocol::ClientError> {
                 self.inner.complete().await
+            }
+
+            /// Get a reference to the underlying SendStream for sending notifications
+            pub fn send_stream(&self) -> &iroh::endpoint::SendStream {
+                self.inner.send_stream()
+            }
+
+            /// Get a reference to the underlying RecvStream for receiving acknowledgments
+            pub fn recv_stream(&self) -> &iroh::endpoint::RecvStream {
+                self.inner.recv_stream()
             }
         }
     }

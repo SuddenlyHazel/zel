@@ -362,6 +362,29 @@ pub struct SubscriptionStream {
     inner: FramedRead<RecvStream, LengthDelimitedCodec>,
 }
 
+impl SubscriptionStream {
+    /// Get a reference to the underlying RecvStream
+    ///
+    /// This allows direct access to all RecvStream methods like:
+    /// - `id()` - Get the stream ID
+    /// - `stop(VarInt)` - Explicitly stop receiving and notify server
+    /// - `received_reset()` - Wait for server reset signal
+    /// - `is_0rtt()` - Check if this is a 0-RTT stream
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use zel_core::protocol::SubscriptionStream;
+    /// # async fn example(stream: SubscriptionStream) {
+    /// // Get stream ID for logging
+    /// let stream_id = stream.stream().id();
+    /// println!("Subscription on stream {}", stream_id);
+    /// # }
+    /// ```
+    pub fn stream(&self) -> &RecvStream {
+        self.inner.get_ref()
+    }
+}
+
 impl Stream for SubscriptionStream {
     type Item = Result<SubscriptionMsg, ClientError>;
 
@@ -443,5 +466,19 @@ impl NotificationSender {
             .map_err(|e| ClientError::Connection(e.to_string()))?;
 
         Ok(())
+    }
+
+    /// Get a reference to the underlying SendStream
+    ///
+    /// This allows direct access to all SendStream methods for the notification stream.
+    pub fn send_stream(&self) -> &iroh::endpoint::SendStream {
+        self.tx.get_ref()
+    }
+
+    /// Get a reference to the underlying RecvStream
+    ///
+    /// This allows direct access to all RecvStream methods for receiving acknowledgments.
+    pub fn recv_stream(&self) -> &RecvStream {
+        self.rx.get_ref()
     }
 }
