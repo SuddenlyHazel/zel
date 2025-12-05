@@ -78,6 +78,16 @@ impl RpcClient {
         Ok(Self { connection })
     }
 
+    /// Get a reference to the underlying Iroh connection.
+    ///
+    /// This provides access to the raw Iroh connection for advanced use cases
+    /// such as datagrams, 0-RTT, and other QUIC features.
+    ///
+    /// See the [Iroh documentation](https://docs.rs/iroh/latest/iroh/endpoint/struct.Connection.html) for available connection methods.
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
     /// Call an RPC resource
     ///
     /// # Arguments

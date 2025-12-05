@@ -2,6 +2,7 @@
 //!
 //! [`RequestContext`] is passed to all service handlers and provides access to:
 //! - The underlying Iroh connection
+//! - Connection type monitoring (direct vs relay)
 //! - Three-tier extension system (server/connection/request)
 //! - Remote peer information
 //! - Graceful shutdown notifications
@@ -10,7 +11,7 @@
 
 use super::Extensions;
 use iroh::endpoint::Connection;
-use iroh::PublicKey;
+use iroh::{Endpoint, PublicKey, Watcher};
 use std::sync::Arc;
 
 /// Context provided to each RPC and subscription handler.
@@ -29,6 +30,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct RequestContext {
     connection: Connection,
+    endpoint: Endpoint,
     service: String,
     resource: String,
     server_extensions: Extensions,
@@ -43,6 +45,7 @@ impl RequestContext {
     /// This is typically called by the connection handler for each incoming request.
     pub fn new(
         connection: Connection,
+        endpoint: Endpoint,
         service: String,
         resource: String,
         server_extensions: Extensions,
@@ -51,6 +54,7 @@ impl RequestContext {
     ) -> Self {
         Self {
             connection,
+            endpoint,
             service,
             resource,
             server_extensions,
@@ -63,6 +67,40 @@ impl RequestContext {
     /// Get a reference to the underlying Iroh connection.
     pub fn connection(&self) -> &Connection {
         &self.connection
+    }
+
+    /// Get a watcher for the connection type (direct vs relay).
+    ///
+    /// The returned watcher provides real-time monitoring of how this connection is routed:
+    /// - `Direct` - Direct UDP connection to peer
+    /// - `Relay` - Routed through a relay server
+    /// - `Mixed` - Both paths available
+    /// - `None` - No path available
+    ///
+    /// Use this for adaptive behavior, monitoring, and debugging connectivity issues.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use iroh::Watcher;
+    ///
+    /// // Get current connection type
+    /// if let Some(mut watcher) = ctx.connection_type() {
+    ///     let conn_type = watcher.get();
+    ///     log::info!("Connection type: {:?}", conn_type);
+    /// }
+    ///
+    /// // Monitor for changes
+    /// if let Some(watcher) = ctx.connection_type() {
+    ///     use futures::StreamExt;
+    ///     let mut stream = watcher.stream();
+    ///     while let Some(conn_type) = stream.next().await {
+    ///         log::info!("Connection type changed: {:?}", conn_type);
+    ///     }
+    /// }
+    /// ```
+    #[cfg(not(wasm_browser))]
+    pub fn connection_type(&self) -> Option<impl Watcher + use<>> {
+        self.endpoint.conn_type(self.connection.remote_id())
     }
 
     /// Get the remote peer's PublicKey.
@@ -128,6 +166,45 @@ impl RequestContext {
     /// ```
     pub async fn shutdown_notified(&self) {
         self.shutdown_signal.notified().await
+    }
+
+    /// Get the current round-trip time (RTT) estimate for this connection.
+    ///
+    /// This provides the current best estimate of the connection's latency.
+    /// Useful for adaptive behavior, monitoring, and debugging.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let rtt = ctx.connection_rtt();
+    /// if rtt > Duration::from_millis(100) {
+    ///     log::warn!("High latency detected: {:?}", rtt);
+    /// }
+    /// ```
+    pub fn connection_rtt(&self) -> std::time::Duration {
+        self.connection.rtt()
+    }
+
+    /// Get detailed statistics for this connection.
+    ///
+    /// Returns comprehensive metrics including:
+    /// - UDP statistics (packets sent/received, bytes transferred)
+    /// - Path statistics (congestion window, RTT variance)
+    /// - Frame statistics (sent/received frame counts by type)
+    ///
+    /// Useful for monitoring, debugging, and performance analysis.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let stats = ctx.connection_stats();
+    /// log::info!(
+    ///     "Connection stats - RTT: {:?}, sent: {} bytes, lost: {} packets",
+    ///     stats.path.rtt,
+    ///     stats.udp.datagrams_sent,
+    ///     stats.path.lost_packets
+    /// );
+    /// ```
+    pub fn connection_stats(&self) -> iroh::endpoint::ConnectionStats {
+        self.connection.stats()
     }
 }
 

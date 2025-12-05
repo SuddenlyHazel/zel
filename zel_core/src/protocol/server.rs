@@ -26,6 +26,7 @@ impl ProtocolHandler for super::RpcServer<'static> {
         let server_extensions = self.server_extensions.clone();
         let connection_hook = self.connection_hook.clone();
         let request_middleware = self.request_middleware.clone();
+        let endpoint = self.endpoint.clone();
         let shutdown_signal = self.shutdown_signal.clone();
         let is_shutting_down = self.is_shutting_down.clone();
         let task_tracker = self.task_tracker.clone();
@@ -37,6 +38,7 @@ impl ProtocolHandler for super::RpcServer<'static> {
                     server_extensions,
                     connection_hook,
                     request_middleware,
+                    endpoint,
                     connection,
                     shutdown_signal,
                     is_shutting_down,
@@ -58,6 +60,7 @@ async fn connection_handler(
     server_extensions: Extensions,
     connection_hook: Option<super::ConnectionHook>,
     request_middleware: Vec<super::RequestMiddleware>,
+    endpoint: iroh::Endpoint,
     connection: Connection,
     shutdown_signal: std::sync::Arc<tokio::sync::Notify>,
     is_shutting_down: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -120,6 +123,7 @@ async fn connection_handler(
                         let server_ext = server_extensions.clone();
                         let conn_ext = connection_extensions.clone();
                         let middleware = request_middleware.clone();
+                        let endpoint_clone = endpoint.clone();
                         let conn = connection.clone();
                         let conn_id = connection.remote_id();
 
@@ -130,7 +134,7 @@ async fn connection_handler(
                             let _guard = task_guard;
 
                             if let Err(e) =
-                                handle_stream(tx, rx, service_map, server_ext, conn_ext, middleware, conn, shutdown_sig)
+                                handle_stream(tx, rx, service_map, server_ext, conn_ext, middleware, endpoint_clone, conn, shutdown_sig)
                                     .await
                             {
                                 log::error!("Stream handler error for {}: {e}", conn_id);
@@ -160,6 +164,7 @@ async fn handle_stream(
     server_extensions: Extensions,
     connection_extensions: Extensions,
     request_middleware: Vec<super::RequestMiddleware>,
+    endpoint: iroh::Endpoint,
     connection: Connection,
     shutdown_signal: std::sync::Arc<tokio::sync::Notify>,
 ) -> anyhow::Result<()> {
@@ -227,6 +232,7 @@ async fn handle_stream(
             // Build RequestContext with all three extension tiers
             let mut ctx = RequestContext::new(
                 connection.clone(),
+                endpoint.clone(),
                 request.service.clone(),
                 request.resource.clone(),
                 server_extensions.clone(),
@@ -313,6 +319,7 @@ async fn handle_stream(
             // Spawn publisher task
             let callback = callback.to_owned();
             let conn_clone = connection.clone();
+            let endpoint_clone = endpoint.clone();
             let server_ext_clone = server_extensions.clone();
             let conn_ext_clone = connection_extensions.clone();
             let middleware_clone = request_middleware.clone();
@@ -324,6 +331,7 @@ async fn handle_stream(
                 // Build RequestContext for subscription
                 let mut ctx = RequestContext::new(
                     conn_clone,
+                    endpoint_clone,
                     request.service.clone(),
                     request.resource.clone(),
                     server_ext_clone,
@@ -392,6 +400,7 @@ async fn handle_stream(
             // Spawn notification consumer task
             let callback = callback.to_owned();
             let conn_clone = connection.clone();
+            let endpoint_clone = endpoint.clone();
             let server_ext_clone = server_extensions.clone();
             let conn_ext_clone = connection_extensions.clone();
             let middleware_clone = request_middleware.clone();
@@ -403,6 +412,7 @@ async fn handle_stream(
                 // Build RequestContext for notification
                 let mut ctx = RequestContext::new(
                     conn_clone,
+                    endpoint_clone,
                     request.service.clone(),
                     request.resource.clone(),
                     server_ext_clone,
@@ -461,6 +471,7 @@ async fn handle_stream(
             // Spawn stream handler task with RAW streams (no codec wrapping)
             let callback = callback.to_owned();
             let conn_clone = connection.clone();
+            let endpoint_clone = endpoint.clone();
             let server_ext_clone = server_extensions.clone();
             let conn_ext_clone = connection_extensions.clone();
             let middleware_clone = request_middleware.clone();
@@ -472,6 +483,7 @@ async fn handle_stream(
                 // Build RequestContext for stream handler
                 let mut ctx = RequestContext::new(
                     conn_clone,
+                    endpoint_clone,
                     request.service.clone(),
                     request.resource.clone(),
                     server_ext_clone,

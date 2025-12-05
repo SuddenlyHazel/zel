@@ -2,7 +2,7 @@ use iroh::{
     discovery::dns::DnsDiscovery,
     endpoint::BindError,
     protocol::{DynProtocolHandler, Router, RouterBuilder},
-    Endpoint, SecretKey,
+    Endpoint, SecretKey, Watcher,
 };
 use log::warn;
 use std::time::Duration;
@@ -311,5 +311,168 @@ impl IrohBundle {
 
         log::info!("Complete shutdown finished");
         Ok(())
+    }
+
+    /// Get endpoint metrics for monitoring and observability.
+    ///
+    /// Returns comprehensive metrics about the endpoint's operation including:
+    /// - Connection statistics (direct/relay connections)
+    /// - Packet send/receive counts
+    /// - Handshake success/failure rates
+    /// - And many more operational metrics
+    ///
+    /// **Note:** This requires the `metrics` feature to be enabled on the `iroh` dependency.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use zel_core::IrohBundle;
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let bundle = IrohBundle::builder(None).await?.finish().await;
+    ///
+    /// // Access metrics
+    /// let metrics = bundle.metrics();
+    /// println!("Datagrams received: {}", metrics.magicsock.recv_datagrams.get());
+    /// println!("Direct connections: {}", metrics.magicsock.num_direct_conns_added.get());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// For integration with Prometheus or other monitoring systems, see the
+    /// `metrics_prometheus` example.
+    #[cfg(feature = "metrics")]
+    pub fn metrics(&self) -> &iroh::metrics::EndpointMetrics {
+        self.endpoint.metrics()
+    }
+
+    /// Wait until the endpoint is considered "online".
+    ///
+    /// This waits for the endpoint to connect to at least one relay server and have
+    /// at least one local IP address available. Once this resolves, the endpoint should
+    /// be reachable by other peers.
+    ///
+    /// **Note:** This has no timeout. Wrap in `tokio::time::timeout` if needed.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use zel_core::IrohBundle;
+    /// # use std::time::Duration;
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let bundle = IrohBundle::builder(None).await?.finish().await;
+    ///
+    /// // Wait for ready state before accepting traffic
+    /// tokio::select! {
+    ///     _ = bundle.wait_online() => {
+    ///         println!("Endpoint is online and ready!");
+    ///     }
+    ///     _ = tokio::time::sleep(Duration::from_secs(10)) => {
+    ///         anyhow::bail!("Endpoint failed to come online");
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn wait_online(&self) {
+        self.endpoint.online().await
+    }
+
+    /// Get a watcher for this endpoint's address.
+    ///
+    /// The returned watcher provides access to the current [`EndpointAddr`](iroh::EndpointAddr)
+    /// and can be used to monitor changes to:
+    /// - The home relay URL
+    /// - Direct IP addresses
+    /// - Network connectivity status
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use zel_core::IrohBundle;
+    /// # use iroh::Watcher;
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let bundle = IrohBundle::builder(None).await?.finish().await;
+    ///
+    /// // Get current address
+    /// let mut addr_watcher = bundle.watch_addr();
+    /// let addr = addr_watcher.get();
+    /// println!("Endpoint ID: {}", addr.id);
+    /// println!("Relay URLs: {:?}", addr.relay_urls().collect::<Vec<_>>());
+    ///
+    /// // Monitor for changes
+    /// let watcher = bundle.watch_addr();
+    /// tokio::spawn(async move {
+    ///     let mut stream = watcher.stream();
+    ///     while let Some(addr) = stream.next().await {
+    ///         println!("Address changed: {:?}", addr);
+    ///     }
+    /// });
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(not(wasm_browser))]
+    pub fn watch_addr(&self) -> impl Watcher<Value = iroh::EndpointAddr> + use<> {
+        self.endpoint.watch_addr()
+    }
+
+    /// Check if the endpoint is currently online.
+    ///
+    /// Returns `true` if the endpoint has at least one dialable address (direct or relay).
+    /// Returns `false` if the endpoint has no way for remote peers to connect.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use zel_core::IrohBundle;
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let bundle = IrohBundle::builder(None).await?.finish().await;
+    /// bundle.wait_online().await;
+    ///
+    /// if bundle.is_online() {
+    ///     println!("Ready to accept connections!");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn is_online(&self) -> bool {
+        !self.endpoint.addr().addrs.is_empty()
+    }
+
+    /// Notify Iroh that network conditions may have changed.
+    ///
+    /// This triggers re-evaluation of:
+    /// - Direct addresses
+    /// - Relay reconnection if needed
+    /// - Path migration for existing connections
+    ///
+    /// **Use Cases:**
+    /// - **Mobile Apps:** WiFi ↔ Cellular transitions
+    /// - **Laptop Suspend/Resume:** Network interfaces change
+    /// - **VPN Changes:** Network topology shifts
+    /// - **Docker/Container:** Network namespace changes
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use zel_core::IrohBundle;
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let bundle = IrohBundle::builder(None).await?.finish().await;
+    ///
+    /// // Called when OS detects network change
+    /// bundle.notify_network_change().await;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Platform Integration
+    /// ```rust,ignore
+    /// // Android - call from Java NetworkCallback
+    /// #[cfg(target_os = "android")]
+    /// bundle.notify_network_change().await;
+    ///
+    /// // iOS - call from NWPathMonitor
+    /// #[cfg(target_os = "ios")]
+    /// bundle.notify_network_change().await;
+    ///
+    /// // Desktop - call on resume from suspend
+    /// bundle.notify_network_change().await;
+    /// ```
+    pub async fn notify_network_change(&self) {
+        self.endpoint.network_change().await
     }
 }
