@@ -1,3 +1,20 @@
+//! RPC protocol implementation including server, client, and service definition.
+//!
+//! This module provides the core protocol types for building RPC services over Iroh.
+//! Most users will interact with [`RpcServerBuilder`] for servers and [`RpcClient`] for clients.
+//!
+//! # Key Types
+//!
+//! - [`RpcServerBuilder`] - Builds RPC servers with services
+//! - [`RpcClient`] - Makes RPC calls and manages subscriptions
+//! - [`RequestContext`] - Provides handlers access to connection info and extensions
+//! - [`zel_service`] - Macro for defining type-safe services
+//!
+//! # Service Definition
+//!
+//! Services are typically defined using the [`zel_service`] macro which generates
+//! server and client code automatically. See the [crate-level docs](crate) for examples.
+
 use std::sync::atomic::AtomicBool;
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
@@ -30,23 +47,34 @@ pub use extensions::Extensions;
 // Re-export shutdown types
 pub use shutdown::TaskTracker;
 
+/// Request body type indicating the endpoint type and optional parameters.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Body {
+    /// Subscription request (server-to-client streaming)
     Subscribe,
+    /// RPC method call with serialized parameters
     Rpc(Bytes),
-    Stream(Bytes), // Request to open a raw bidirectional stream, with optional serialized parameters
-    Notify(Bytes), // Request to establish notification stream (client-to-server streaming)
+    /// Raw bidirectional stream request with optional serialized parameters
+    Stream(Bytes),
+    /// Notification stream request (client-to-server streaming) with optional parameters
+    Notify(Bytes),
 }
 
+/// RPC request containing service name, resource name, and body.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
+    /// The service name to route to
     pub service: String,
+    /// The resource (method/subscription/etc) name within the service
     pub resource: String,
+    /// The request body indicating endpoint type and parameters
     pub body: Body,
 }
 
+/// RPC response containing serialized result data.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
+    /// Serialized response data
     pub data: Bytes,
 }
 
@@ -113,10 +141,18 @@ pub struct RpcService<'a> {
     resources: HashMap<&'a str, ResourceCallback>,
 }
 
+/// Handler function for different RPC endpoint types.
+///
+/// Each variant wraps a different handler type for the four endpoint patterns:
+/// methods (RPC), subscriptions, notifications, and raw streams.
 pub enum ResourceCallback {
+    /// Handler for request/response methods
     Rpc(Rpc),
+    /// Handler for server-to-client subscriptions
     SubscriptionProducer(Subscription),
+    /// Handler for client-to-server notifications
     NotificationConsumer(NotificationHandler),
+    /// Handler for bidirectional raw streams
     StreamHandler(StreamHandler),
 }
 
@@ -223,7 +259,39 @@ pub type RequestMiddleware =
 
 use futures::SinkExt;
 
-/// Wrapper around FramedWrite for easy subscription message sending
+/// Wrapper for sending subscription data from server to client.
+///
+/// This is used in **server-to-client streaming** endpoints (subscriptions).
+/// The server sends data over time to the client using this sink.
+///
+/// # Directionality
+///
+/// ```text
+/// Server ──[SubscriptionSink]──> Client
+/// ```
+///
+/// The server handler receives a `SubscriptionSink` and uses it to push data to the client.
+/// Contrast this with [`NotificationSink`] which goes the opposite direction.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// async fn counter(
+///     ctx: RequestContext,
+///     mut sink: SubscriptionSink,
+///     interval_ms: u64,
+/// ) -> Result<(), String> {
+///     let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+///
+///     for i in 0..10 {
+///         interval.tick().await;
+///         sink.send(&i).await?; // Server sends to client
+///     }
+///
+///     sink.close().await?;
+///     Ok(())
+/// }
+/// ```
 pub struct SubscriptionSink {
     inner: FramedWrite<SendStream, LengthDelimitedCodec>,
 }
@@ -309,7 +377,45 @@ pub enum SubscriptionError {
 
 use tokio_util::codec::FramedRead;
 
-/// Wrapper around FramedWrite for sending notification acknowledgments
+/// Wrapper for sending acknowledgments in client-to-server streaming.
+///
+/// This is used in **client-to-server streaming** endpoints (notifications).
+/// The server receives data from the client and uses this sink to send acknowledgments back.
+///
+/// # Directionality
+///
+/// ```text
+/// Client ──[NotificationMsg::Data]──> Server
+/// Client <──[NotificationMsg::Ack]──── Server (via NotificationSink)
+/// ```
+///
+/// The client pushes data to the server, and the server uses `NotificationSink` to acknowledge
+/// receipt. Contrast this with [`SubscriptionSink`] which sends data from server to client.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// async fn log_receiver(
+///     ctx: RequestContext,
+///     mut recv: FramedRead<RecvStream, LengthDelimitedCodec>,
+///     mut ack_sink: NotificationSink,
+/// ) -> Result<(), String> {
+///     while let Some(msg_bytes) = recv.next().await {
+///         let msg: NotificationMsg = serde_json::from_slice(&msg_bytes?)?;
+///
+///         match msg {
+///             NotificationMsg::Data(data) => {
+///                 // Process client data
+///                 process_log_entry(&data);
+///                 ack_sink.ack().await?; // Acknowledge receipt
+///             }
+///             NotificationMsg::Completed => break,
+///             _ => {}
+///         }
+///     }
+///     Ok(())
+/// }
+/// ```
 pub struct NotificationSink {
     inner: FramedWrite<SendStream, LengthDelimitedCodec>,
 }
@@ -602,7 +708,59 @@ mod tests {
 // Builder Pattern
 // ============================================================================
 
-/// Builder for constructing an RpcServer with a fluent API
+/// Builder for constructing an RpcServer with a fluent API.
+///
+/// `RpcServerBuilder` provides a fluent interface for configuring RPC servers with
+/// services, middleware, connection hooks, and server-level extensions.
+///
+/// # Quick Start
+///
+/// ```rust,no_run
+/// use zel_core::protocol::{RpcServerBuilder, RequestContext};
+/// use zel_core::IrohBundle;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let mut bundle = IrohBundle::builder(None).await?;
+/// let endpoint = bundle.endpoint().clone();
+///
+/// // Build a server with a service
+/// let server = RpcServerBuilder::new(b"myapp/1", endpoint)
+///     .service("calculator")
+///         .rpc_resource("add", |ctx: RequestContext, req| {
+///             Box::pin(async move {
+///                 // Handle the request
+///                 Ok(zel_core::protocol::Response {
+///                     data: bytes::Bytes::from("result")
+///                 })
+///             })
+///         })
+///         .build()
+///     .build();
+///
+/// bundle.accept(b"myapp/1", server).finish().await;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Adding Services
+///
+/// Services are added using [`service()`](RpcServerBuilder::service), which returns a
+/// [`ServiceBuilder`] for defining resources (methods, subscriptions, notifications, streams).
+///
+/// Most users will prefer the [`zel_service`](crate::protocol::zel_service) macro which
+/// generates the service builder code automatically.
+///
+/// # Shutdown Support
+///
+/// - Use [`build()`](RpcServerBuilder::build) for simple cases
+/// - Use [`build_with_shutdown()`](RpcServerBuilder::build_with_shutdown) to get a [`ShutdownHandle`]
+///   that allows triggering graceful shutdown after the server has been moved into the router
+///
+/// # Extensions and Middleware
+///
+/// - [`with_extensions()`](RpcServerBuilder::with_extensions) - Add server-level extensions (shared across all connections)
+/// - [`with_connection_hook()`](RpcServerBuilder::with_connection_hook) - Set up per-connection state
+/// - [`with_request_middleware()`](RpcServerBuilder::with_request_middleware) - Add request-level middleware
 pub struct RpcServerBuilder<'a> {
     alpn: &'a [u8],
     endpoint: Endpoint,
@@ -811,7 +969,41 @@ impl<'a> RpcServer<'a> {
     }
 }
 
-/// Builder for constructing an RpcService with resources
+/// Builder for defining resources within a service.
+///
+/// Created by [`RpcServerBuilder::service()`]. Add resources (methods, subscriptions,
+/// notifications, streams) then call [`build()`](ServiceBuilder::build) to return to
+/// the server builder.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use zel_core::protocol::{RpcServerBuilder, RequestContext, Response};
+/// use bytes::Bytes;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// # let endpoint = iroh::Endpoint::builder().bind().await?;
+/// let server = RpcServerBuilder::new(b"myapp/1", endpoint)
+///     .service("calculator")
+///         .rpc_resource("add", |ctx: RequestContext, req| {
+///             Box::pin(async move {
+///                 // Handle request
+///                 Ok(Response { data: Bytes::from("result") })
+///             })
+///         })
+///         .rpc_resource("multiply", |ctx, req| {
+///             Box::pin(async move {
+///                 Ok(Response { data: Bytes::from("result") })
+///             })
+///         })
+///         .build() // Returns to RpcServerBuilder
+///     .build(); // Builds the server
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Typically you'll use the [`zel_service`](crate::protocol::zel_service) macro instead
+/// of manually adding resources. The macro generates all this builder code for you.
 pub struct ServiceBuilder<'a> {
     name: &'a str,
     resources: HashMap<&'a str, ResourceCallback>,

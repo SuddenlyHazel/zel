@@ -42,7 +42,39 @@ pub type ShutdownListener = tokio::sync::oneshot::Receiver<ShutdownReplier>;
 /// A collection of shutdown notification senders.
 pub type ShutdownSubscribers = Vec<tokio::sync::oneshot::Sender<ShutdownReplier>>;
 
-/// A builder for configuring an [`IrohBundle`] with custom protocol handlers and shutdown subscribers.
+/// Builder for configuring an [`IrohBundle`] with protocol handlers and shutdown management.
+///
+/// Created via [`IrohBundle::builder()`]. Use this to register protocol handlers
+/// before calling [`finish()`](Builder::finish) to create the bundle.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use zel_core::IrohBundle;
+/// use zel_core::protocol::RpcServerBuilder;
+/// use std::time::Duration;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let mut builder = IrohBundle::builder(None).await?;
+/// let endpoint = builder.endpoint().clone();
+///
+/// // Register shutdown subscriber if needed
+/// let shutdown_rx = builder.subscribe_shutdown();
+///
+/// // Build and register server
+/// let server = RpcServerBuilder::new(b"myapp/1", endpoint).build();
+/// let bundle = builder.accept(b"myapp/1", server).finish().await;
+///
+/// // Later handle shutdown
+/// tokio::spawn(async move {
+///     if let Ok(replier) = shutdown_rx.await {
+///         // Cleanup...
+///         replier.complete().await;
+///     }
+/// });
+/// # Ok(())
+/// # }
+/// ```
 pub struct Builder {
     endpoint: Endpoint,
     router_builder: RouterBuilder,
@@ -105,8 +137,47 @@ impl Builder {
 
 /// A bundle containing an Iroh endpoint, router, and shutdown management.
 ///
-/// This struct manages the lifecycle of an Iroh networking stack, including
-/// graceful shutdown coordination with subscribers.
+/// `IrohBundle` manages the complete lifecycle of an Iroh networking stack,
+/// including endpoint configuration, protocol routing, and coordinated graceful shutdown.
+///
+/// # Quick Start
+///
+/// ```rust,no_run
+/// use zel_core::IrohBundle;
+/// use zel_core::protocol::RpcServerBuilder;
+/// use std::time::Duration;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// // Create and configure bundle
+/// let mut builder = IrohBundle::builder(None).await?;
+/// let endpoint = builder.endpoint().clone();
+///
+/// // Build and register server
+/// let server = RpcServerBuilder::new(b"myapp/1", endpoint).build();
+/// let bundle = builder.accept(b"myapp/1", server).finish().await;
+///
+/// println!("Server listening at: {}", bundle.endpoint.id());
+///
+/// // ... run your application ...
+///
+/// // Graceful shutdown
+/// bundle.shutdown(Duration::from_secs(30)).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # DNS Discovery
+///
+/// By default, `IrohBundle::builder()` configures the endpoint with n0 DNS discovery
+/// for peer-to-peer connectivity. The endpoint can be further customized through the
+/// [`Builder`] before calling [`Builder::finish()`].
+///
+/// # Shutdown Patterns
+///
+/// - Use [`shutdown()`](IrohBundle::shutdown) for simple cases - shuts down subscribers then the router
+/// - Use [`shutdown_with_handle()`](IrohBundle::shutdown_with_handle) when coordinating RPC server shutdown
+///
+/// See [`Builder::subscribe_shutdown()`] to receive shutdown notifications in your components.
 pub struct IrohBundle {
     /// The Iroh network endpoint.
     pub endpoint: Endpoint,

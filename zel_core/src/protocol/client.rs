@@ -8,7 +8,46 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 use crate::protocol::{Body, Request, ResourceError, Response, SubscriptionMsg};
 
-/// Client for making RPC calls and subscriptions over Iroh
+/// Client for making RPC calls and subscriptions over Iroh.
+///
+/// `RpcClient` provides low-level access to RPC endpoints. For services defined with
+/// the [`zel_service`](crate::protocol::zel_service) macro, use the generated typed
+/// client wrapper instead (e.g., `CalculatorClient`) for type safety and convenience.
+///
+/// # Quick Start
+///
+/// ```rust,no_run
+/// use zel_core::protocol::RpcClient;
+/// use bytes::Bytes;
+///
+/// # async fn example(connection: iroh::endpoint::Connection) -> Result<(), Box<dyn std::error::Error>> {
+/// // Create client from an Iroh connection
+/// let client = RpcClient::new(connection).await?;
+///
+/// // For macro-generated services, use the typed client:
+/// // let calculator = CalculatorClient::new(client);
+/// // let result = calculator.add(5, 3).await?;
+///
+/// // For manual usage, call endpoints directly:
+/// let params = serde_json::to_vec(&(5, 3))?;
+/// let response = client.call("math", "add", Bytes::from(params)).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # RPC Patterns
+///
+/// - [`call()`](RpcClient::call) - Request/response RPC
+/// - [`subscribe()`](RpcClient::subscribe) - Server-to-client streaming
+/// - [`notify()`](RpcClient::notify) - Client-to-server streaming
+/// - [`open_stream()`](RpcClient::open_stream) - Bidirectional custom protocol
+///
+/// # Typed Clients
+///
+/// The [`zel_service`](crate::protocol::zel_service) macro automatically generates
+/// typed client wrappers that provide a better API than calling these methods directly.
+/// See [`examples/macro_service_example.rs`](https://github.com/SuddenlyHazel/zel/blob/main/zel_core/examples/macro_service_example.rs)
+/// for a complete example.
 #[derive(Clone)]
 pub struct RpcClient {
     connection: Connection,
@@ -357,7 +396,35 @@ impl RpcClient {
     }
 }
 
-/// A stream of subscription messages
+/// Stream for receiving server-to-client subscription data.
+///
+/// This is the **client-side** counterpart to the server's [`SubscriptionSink`](crate::protocol::SubscriptionSink).
+/// The client receives subscription data pushed by the server over time.
+///
+/// # Directionality
+///
+/// ```text
+/// Server ──[SubscriptionMsg]──> Client (SubscriptionStream)
+/// ```
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use futures::StreamExt;
+///
+/// let mut stream = client.subscribe("calculator", "counter", None).await?;
+///
+/// while let Some(msg) = stream.next().await {
+///     match msg? {
+///         SubscriptionMsg::Data(data) => {
+///             let count: u64 = serde_json::from_slice(&data)?;
+///             println!("Received: {}", count);
+///         }
+///         SubscriptionMsg::Stopped => break,
+///         _ => {}
+///     }
+/// }
+/// ```
 pub struct SubscriptionStream {
     inner: FramedRead<RecvStream, LengthDelimitedCodec>,
 }
@@ -411,7 +478,32 @@ impl Drop for SubscriptionStream {
     }
 }
 
-/// Client-side notification sender (client-to-server streaming)
+/// Sender for pushing client-to-server notification data.
+///
+/// This is the **client-side** counterpart to the server's notification handler.
+/// The client pushes data to the server and receives acknowledgments.
+///
+/// # Directionality
+///
+/// ```text
+/// Client (NotificationSender) ──[NotificationMsg::Data]──> Server
+/// Client <──[NotificationMsg::Ack]──────────────────────── Server
+/// ```
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let mut sender = client.notify("logs", "upload", None).await?;
+///
+/// // Send multiple messages
+/// sender.send(&"Starting process".to_string()).await?;
+/// sender.send(&"Process complete".to_string()).await?;
+///
+/// // Signal completion
+/// sender.complete().await?;
+/// ```
+///
+/// Each [`send()`](NotificationSender::send) waits for acknowledgment before returning.
 pub struct NotificationSender {
     tx: FramedWrite<iroh::endpoint::SendStream, LengthDelimitedCodec>,
     rx: FramedRead<RecvStream, LengthDelimitedCodec>,

@@ -1,3 +1,47 @@
+//! Type-safe extension storage for server, connection, and request-level data.
+//!
+//! The extension system provides three tiers of context storage for sharing data
+//! across different scopes in your RPC application.
+//!
+//! # How Extensions Work
+//!
+//! Extensions work like a type-safe HashMap where the type itself is the key.
+//! You can only store one value of each type, and you retrieve it by type:
+//!
+//! ```rust
+//! use zel_core::protocol::Extensions;
+//!
+//! #[derive(Clone)]
+//! struct DatabasePool { url: String }
+//!
+//! #[derive(Clone)]
+//! struct UserId(String);
+//!
+//! // Create and populate
+//! let ext = Extensions::new()
+//!     .with(DatabasePool { url: "postgres://...".into() })
+//!     .with(UserId("user123".into()));
+//!
+//! // Retrieve by type
+//! let db = ext.get::<DatabasePool>().expect("db not found");
+//! let user = ext.get::<UserId>().expect("user not found");
+//! println!("DB: {}, User: {}", db.url, user.0);
+//! ```
+//!
+//! # Three-Tier Pattern
+//!
+//! Access extensions through [`RequestContext`](crate::protocol::RequestContext):
+//!
+//! - **Server Extensions** (`ctx.server_extensions()`) - Shared across all connections
+//!   - Database pools, configuration, shared caches, metrics collectors
+//! - **Connection Extensions** (`ctx.connection_extensions()`) - Per-connection state
+//!   - User sessions, authentication state, per-peer metrics
+//! - **Request Extensions** (`ctx.extensions()`) - Per-request data
+//!   - Distributed trace IDs, request timing, per-call context
+//!
+//! See [`examples/context_extensions_demo.rs`](https://github.com/SuddenlyHazel/zel/blob/main/zel_core/examples/context_extensions_demo.rs)
+//! for a complete working example.
+
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
