@@ -71,72 +71,20 @@ sequenceDiagram
 
 ## RequestContext & Extensions
 
+Zel uses a three-tier extension system to share context across different scopes:
+
 #### Server Extensions (Shared)
-- Database connection pools
-- Configuration
-- Shared caches
-- Metrics collectors
+- Database connection pools, configuration, shared caches, metrics collectors
 
 #### Connection Extensions (Isolated)
-- User sessions
-- Authentication state
-- Per-peer metrics
+- User sessions, authentication state, per-peer metrics
 
 #### Request Extensions (Unique)
-- Distributed trace IDs
-- Request timing
-- Per-call context
+- Distributed trace IDs, request timing, per-call context
 
-**See [`examples/context_extensions_demo.rs`](zel_core/examples/context_extensions_demo.rs) for complete implementation**
+**📚 For complete documentation, see [`doc_more/EXTENSIONS.MD`](doc_more/EXTENSIONS.MD)**
 
-### Extension Lifecycle
-
-```mermaid
-sequenceDiagram
-    participant User as User Code
-    participant Builder as RpcServerBuilder
-    participant Server as RpcServer
-    participant ConnHandler as Connection Handler
-    participant ReqHandler as Request Handler
-    
-    User->>Builder: with_extensions(db_pool)
-    Note over Builder: Server extensions stored
-    
-    User->>Builder: with_connection_hook(auth_hook)
-    Note over Builder: Hook registered
-    
-    User->>Builder: with_request_middleware(tracer)
-    Note over Builder: Middleware registered
-    
-    Builder->>Server: build()
-    
-    loop For each connection
-        Server->>ConnHandler: New connection
-        ConnHandler->>ConnHandler: Call connection_hook()
-        Note over ConnHandler: Creates connection_extensions
-        
-        loop For each request
-            ConnHandler->>ReqHandler: New request
-            Note over ReqHandler: Creates RequestContext with:<br/>- server_extensions<br/>- connection_extensions<br/>- empty request_extensions
-            
-            ReqHandler->>ReqHandler: Apply middleware chain
-            Note over ReqHandler: Each middleware enriches<br/>request_extensions
-            
-            ReqHandler->>User: Handler(ctx, params)
-            User->>User: Access extensions via ctx
-        end
-    end
-```
-
-### Connection Hooks
-
-Run **once per connection** before any requests are processed. Used for authentication, session setup, etc.
-
-### Request Middleware
-
-Run **for every request** in a chain. Used for tracing, logging, timing, etc.
-
-**See [`examples/context_extensions_demo.rs`](zel_core/examples/context_extensions_demo.rs) for implementation patterns**
+**💡 For working examples, see [`examples/context_extensions_demo.rs`](zel_core/examples/context_extensions_demo.rs)**
 
 ---
 
