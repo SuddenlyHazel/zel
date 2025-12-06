@@ -53,15 +53,35 @@ mod service;
 ///     // ... other methods
 /// }
 /// ```
+/// # Generated Code Preview
 ///
-/// # Generated Code
+/// ```rust
+/// // Generated MathServer trait (implement this)
+/// #[async_trait]
+/// pub trait MathServer {
+///     async fn add(&self, ctx: RequestContext, a: i32, b: i32) -> Result<i32, ResourceError>;
 ///
-/// For each service, the macro generates:
-/// - `{Service}Server` trait - Implement this with your business logic
-/// - `{Service}Client` struct - Type-safe client for making calls
-/// - Helper types for subscriptions and notifications
+///     // Subscription with typed sink
+///     async fn counter(
+///         &self,
+///         ctx: RequestContext,
+///         sink: MathCounterSink,
+///         interval_ms: u64
+///     ) -> Result<(), ResourceError>;
+/// }
 ///
-/// See [`zel_core::protocol`](https://docs.rs/zel_core/latest/zel_core/protocol/) for usage in context.
+/// // Generated MathClient (type-safe calls)
+/// pub struct MathClient<RpcClient> {
+///     client: RpcClient
+/// }
+///
+/// impl<R> MathClient<R> {
+///     pub async fn add(&self, a: i32, b: i32) -> Result<i32, ClientError>;
+///     pub async fn counter(&self, interval_ms: u64) -> Result<SubscriptionStream, ClientError>;
+/// }
+/// ```
+///
+/// See [`zel_core::protocol`](https://docs.rs/zel_core/latest/zel_core/protocol/) for full usage.
 /// For complete examples, see the
 /// [examples directory](https://github.com/SuddenlyHazel/zel/tree/main/zel_core/examples).
 #[proc_macro_attribute]

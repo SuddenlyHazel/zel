@@ -1,4 +1,11 @@
-//! Example demonstrating endpoint metrics export to Prometheus.
+//! # Example: Metrics Prometheus
+//!
+//! Demonstrates endpoint metrics export to Prometheus.
+//! Features: Registry, HTTP server, real-time connection stats.
+//!
+//! Run: `cargo run --example metrics_prometheus --features metrics`
+//!
+//! Expected: Metrics server on :9090/metrics, scrape with Prometheus.
 //!
 //! This example shows how to:
 //! 1. Enable and access endpoint metrics

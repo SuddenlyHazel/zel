@@ -433,54 +433,15 @@ impl From<anyhow::Error> for ServiceError {
 }
 
 /// Default number of consecutive failures before opening the circuit.
-///
-/// # Rationale
-///
-/// We chose 5 consecutive failures as our default because it:
-/// - Balances sensitivity with stability
-/// - Provides enough signal to detect genuine service problems
-/// - Avoids false positives from occasional transient errors
-///
-/// This is a common threshold in circuit breaker implementations, inspired by
-/// patterns described in Martin Fowler's "CircuitBreaker" article.
 pub const DEFAULT_CONSECUTIVE_FAILURES: u32 = 5;
 
 /// Default number of successful requests needed to close the circuit from half-open state.
-///
-/// # Rationale
-///
-/// We chose 2 consecutive successes as our default because it:
-/// - Prevents premature closure from a single lucky success
-/// - Enables quick restoration once service has genuinely recovered
-/// - Balances caution with responsiveness
-///
-/// This is conservative compared to some implementations that use a single probe,
-/// inspired by circuit breaker patterns from "Release It!" by Michael Nygard.
 pub const DEFAULT_SUCCESS_THRESHOLD: u32 = 2;
 
 /// Default timeout before circuit transitions from open to half-open (in seconds).
-///
-/// # Rationale
-///
-/// We chose 30 seconds as our default because it:
-/// - Provides sufficient time for most transient issues to resolve
-/// - Balances quick recovery with avoiding circuit flapping
-/// - Prevents excessive downtime while still protecting the system
-///
-/// This timeout is within the common range (10-60s) used by various resilience
-/// libraries, though specific defaults vary by implementation.
 pub const DEFAULT_CIRCUIT_TIMEOUT_SECS: u64 = 30;
 
 /// Default probe interval for half-open state verification.
-///
-/// # Rationale
-///
-/// We chose 3 as our default probe interval because it:
-/// - Provides multiple samples to reduce false positives
-/// - Limits exposure during recovery testing
-/// - Balances confidence in recovery with quick restoration
-///
-/// This is our engineering choice for the half-open state testing phase.
 pub const DEFAULT_PROBE_INTERVAL: u32 = 3;
 
 /// Configuration for circuit breaker behavior

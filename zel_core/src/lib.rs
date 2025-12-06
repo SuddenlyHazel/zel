@@ -8,6 +8,7 @@
 //!
 //! ```rust,no_run
 //! use zel_core::protocol::{zel_service, RequestContext, RpcServerBuilder, RpcClient};
+//! use zel_core::protocol::{RetryConfig, CircuitBreakerConfig};
 //! use zel_core::IrohBundle;
 //! use zel_types::ResourceError;
 //! use async_trait::async_trait;
@@ -55,9 +56,25 @@
 //!     let math = MathClient::new(client);
 //!     let result = math.add(5, 3).await?; // Returns 8
 //!
+//!     // P2P Resilience: Wait for online, retries
+//!     client_bundle.wait_online().await; // Holepunch/relays ready
+//!     let retry_client = RpcClient::builder(conn)
+//!         .with_retry_config(RetryConfig::builder().max_attempts(3).build())
+//!         .build()
+//!         .await?;
+//!
 //!     server_bundle.shutdown(Duration::from_secs(5)).await?;
 //!     Ok(())
 //! }
+//!
+//! // Server-side resilience
+//! let server = RpcServerBuilder::new(b"math/1", endpoint)
+//!     .with_circuit_breaker(CircuitBreakerConfig::builder()
+//!         .failure_threshold(0.5)
+//!         .build())
+//!     .service("math")
+//!     .build()
+//!     .build();
 //! ```
 //!
 //! # Core Components

@@ -1,4 +1,11 @@
-//! Minimal example: circuit breaker + `zel_service` macros
+//! # Example: Circuit Breaker Macro
+//!
+//! Demonstrates per-peer circuit breakers with `#[zel_service]`.
+//! Features: `with_circuit_breaker`, `ResourceError::app/infra`, `CircuitBreakerOpen`.
+//!
+//! Run: `cargo run --example circuit_breaker_macro_example`
+//!
+//! Expected: App errors don't trip, infra errors do → open circuit.
 //!
 //! This focuses purely on:
 //! - Enabling per-peer circuit breakers via `RpcServerBuilder::with_circuit_breaker`

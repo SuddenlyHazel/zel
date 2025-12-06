@@ -1,4 +1,11 @@
-//! Example of raw bidirectional stream support with macros
+//! # Example: Raw Streams
+//!
+//! Demonstrates `#[stream]` for custom bidirectional protocols.
+//! Features: Raw SendStream/RecvStream, custom wire format (chunked transfer).
+//!
+//! Run: `cargo run --example raw_stream_example`
+//!
+//! Expected: Metadata RPC, chunked file transfer with ACKs.
 //!
 //! Shows #[stream] attribute usage to create endpoints that receive
 //! raw Iroh streams for custom protocols.
