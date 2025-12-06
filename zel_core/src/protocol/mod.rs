@@ -19,7 +19,7 @@ use std::sync::atomic::AtomicBool;
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 use futures::future::BoxFuture;
-use iroh::{endpoint::Connection, Endpoint};
+use iroh::Endpoint;
 use tokio::time::Duration;
 
 // Submodules
@@ -30,6 +30,7 @@ pub mod client;
 pub mod context;
 pub mod error_classification;
 pub mod extensions;
+pub mod handlers;
 pub mod retry;
 pub mod retry_metrics;
 pub mod server;
@@ -56,7 +57,6 @@ pub use context::RequestContext;
 pub use error_classification::{ErrorClassificationExt, ErrorClassifier, ErrorSeverity};
 
 // Also import ErrorSeverity for use in this module
-use error_classification::ErrorSeverity as ErrorSeverityType;
 
 // Re-export extensions
 pub use extensions::Extensions;

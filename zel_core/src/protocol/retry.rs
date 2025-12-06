@@ -16,62 +16,15 @@ pub enum ConfigError {
 }
 
 /// Default maximum number of retry attempts.
-///
-/// # Rationale
-///
-/// We chose 3 attempts as our default, which matches common patterns in cloud SDK
-/// implementations (e.g., AWS SDK "standard" retry mode defaults to 3 attempts).
-///
-/// This provides:
-/// - A reasonable balance between handling transient failures and avoiding excessive delays
-/// - Quick failure detection for persistent problems
-/// - Cost-effective retry behavior for most scenarios
-///
-/// Empirical studies show most transient failures resolve within the first 2-3 retry
-/// attempts, with diminishing returns beyond that.
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 
 /// Default initial backoff duration for exponential backoff (in milliseconds).
-///
-/// # Rationale
-///
-/// We chose 100ms as our default because it:
-/// - Provides time for transient conditions to resolve (network congestion, brief overload)
-/// - Remains well below user perception thresholds per UX research (Jakob Nielsen's
-///   work suggests ~1 second keeps user flow of thought; 100ms is imperceptible)
-/// - Balances recovery time with responsiveness
-///
-/// This is a common starting point in many retry implementations.
-///
-/// # References
-///
-/// - Nielsen Norman Group: "Response Times: The 3 Important Limits"
-/// - <https://www.nngroup.com/articles/response-times-3-important-limits/>
 pub const DEFAULT_INITIAL_BACKOFF_MS: u64 = 100;
 
 /// Default maximum backoff duration for exponential backoff (in seconds).
-///
-/// # Rationale
-///
-/// We chose 30 seconds as our default maximum backoff because it:
-/// - Prevents indefinite waiting while still allowing time for service recovery
-/// - Falls within the common range of HTTP client timeouts (10-120 seconds)
-/// - Balances quick failure detection with recovery allowance
-///
-/// Note: HTTP client timeouts vary widely by implementation (from 30s to several minutes),
-/// and this value represents a pragmatic middle ground for most use cases.
 pub const DEFAULT_MAX_BACKOFF_SECS: u64 = 30;
 
 /// Default backoff multiplier for exponential backoff.
-///
-/// # Rationale
-///
-/// We chose 2.0 as our default because it:
-/// - Doubles the delay on each retry (classic exponential backoff)
-/// - Balances quick recovery with avoiding thundering herd problems
-/// - Is a common choice in many implementations (e.g., AWS Step Functions default)
-///
-/// Other common values include 1.3-1.5 (more gradual) and 2.0 (standard doubling).
 ///
 /// Formula: `delay_attempt_n = initial_backoff * (multiplier ^ (n - 1))`
 ///

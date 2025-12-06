@@ -1,4 +1,11 @@
-//! Comprehensive demonstration of circuit breaker and retry features in Zel
+//! # Example: Reliability Demo
+//!
+//! Comprehensive circuit breaker + retry demo.
+//! Features: Error classification, circuit states, client retries, metrics.
+//!
+//! Run: `cargo run --example reliability_demo`
+//!
+//! Expected: App errors no trip, infra trip → open → half-open → close.
 //!
 //! This example demonstrates:
 //! - Error classification (Application vs Infrastructure vs System failures)

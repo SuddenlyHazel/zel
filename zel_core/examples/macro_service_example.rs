@@ -1,4 +1,11 @@
-//! Example of zel_service macro
+//! # Example: Macro Service
+//!
+//! Demonstrates `#[zel_service]` macro for defining RPC methods and subscriptions.
+//! Features: Typed client/server traits, auto-serialization, `RequestContext`.
+//!
+//! Run: `cargo run --example macro_service_example`
+//!
+//! Expected: Client/server handshake, add/multiply RPCs, counter subscription ticks.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

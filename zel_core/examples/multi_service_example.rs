@@ -1,4 +1,11 @@
-//! Example of multiple services on a single RPC server
+//! # Example: Multi-Service
+//!
+//! Demonstrates multiple `#[zel_service]` on one server.
+//! Features: ServiceBuilder chaining, typed clients per service.
+//!
+//! Run: `cargo run --example multi_service_example`
+//!
+//! Expected: Calculator + Hello services, RPCs + subs on both.
 //!
 //! Shows:
 //! - Defining multiple services using #[zel_service]

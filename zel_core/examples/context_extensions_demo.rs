@@ -1,4 +1,11 @@
-//! Example of three-tier extension system
+//! # Example: Context Extensions
+//!
+//! Demonstrates Zel's 3-tier extension system (server/connection/request).
+//! Features: Shared DB pool, per-conn sessions, per-req tracing, middleware/hooks.
+//!
+//! Run: `cargo run --example context_extensions_demo`
+//!
+//! Expected: Extension access in handlers, middleware enrichment, shared mutable state.
 //!
 //! Shows:
 //! - Server extensions: Shared across all connections (database pool, config)

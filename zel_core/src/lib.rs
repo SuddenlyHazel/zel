@@ -8,6 +8,7 @@
 //!
 //! ```rust,no_run
 //! use zel_core::protocol::{zel_service, RequestContext, RpcServerBuilder, RpcClient};
+//! use zel_core::protocol::{RetryConfig, CircuitBreakerConfig};
 //! use zel_core::IrohBundle;
 //! use zel_types::ResourceError;
 //! use async_trait::async_trait;
@@ -51,9 +52,16 @@
 //!         .connect(server_bundle.endpoint.id(), b"math/1")
 //!         .await?;
 //!
-//!     let client = RpcClient::new(conn).await?;
+//!     let client = RpcClient::new(conn.clone()).await?;
 //!     let math = MathClient::new(client);
 //!     let result = math.add(5, 3).await?; // Returns 8
+//!
+//!     // P2P Resilience: Wait for online, retries
+//!     client_bundle.wait_online().await; // Holepunch/relays ready
+//!     let retry_client = RpcClient::builder(conn)
+//!         .with_retry_config(RetryConfig::builder().max_attempts(3).build()?)
+//!         .build()
+//!         .await?;
 //!
 //!     server_bundle.shutdown(Duration::from_secs(5)).await?;
 //!     Ok(())

@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zel_core::protocol::{
-    client::RpcClient, error_classification::ErrorSeverity as ErrorSeverityType,
-    Body, ResourceError, Response, RetryConfig, RpcServerBuilder,
+    client::RpcClient, error_classification::ErrorSeverity as ErrorSeverityType, Body,
+    ResourceError, Response, RetryConfig, RpcServerBuilder,
 };
 use zel_core::IrohBundle;
 

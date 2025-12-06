@@ -106,12 +106,42 @@ Custom bidirectional protocols - handler receives `RequestContext`, `SendStream`
 
 ---
 
+## P2P Resilience
+
+Zel provides a few resilience tools out of the box:
+
+- **Per-Peer Circuit Breakers**: Isolate sketchy peers (`RpcServerBuilder::with_circuit_breaker(CircuitBreakerConfig::builder().failure_threshold(0.5).build())`).
+- **Automatic Retries**: Exponential backoff/jitter on client (`RpcClient::builder().with_retry_config(RetryConfig::builder().max_attempts(3).build())`).
+- **Error Classification**: Infra errors (network/timeout) trip breakers; app errors (validation) don't.
+- **Monitoring**: `RequestContext::remote_id()`, `connection_rtt()`, `connection_stats()`.
+
+**Example**:
+```rust
+let server = RpcServerBuilder::new(b"app/1", endpoint)
+    .with_circuit_breaker(CircuitBreakerConfig::builder()
+        .failure_threshold(0.5)
+        .consecutive_failures(5)
+        .build())
+    .build();
+```
+
+See [`doc_more/P2P-RESILIENCE.md`](doc_more/P2P-RESILIENCE.md) for complete details.
+
+## Advanced Iroh Integration
+
+Beyond transport, leverage:
+- `IrohBundle::watch_addr()`: Subscribe to EndpointAddr changes (NAT rebinding via netwatch).
+- `IrohBundle::notify_network_change()`: Trigger addr refresh.
+- `IrohBundle::wait_online()` / `is_online()`: Ensure node ready before RPCs.
+
+**P2P Quickstart Extension**:
+```rust
+let bundle = IrohBundle::builder(None).await?.finish().await;
+bundle.wait_online().await;  // Wait for holepunching/relays
+```
+
 ## Examples
 
-Explore the [`zel_core/examples/`](zel_core/examples/) directory for working examples:
+See [`zel_core/examples/README.md`](zel_core/examples/README.md) for full list/table.
 
-- **[`context_extensions_demo.rs`](zel_core/examples/context_extensions_demo.rs)** - Three-tier extension system with database pools, sessions, and tracing
-- **[`macro_service_example.rs`](zel_core/examples/macro_service_example.rs)** - Service definition with methods and subscriptions
-- **[`multi_service_example.rs`](zel_core/examples/multi_service_example.rs)** - Multiple services on single server
-- **[`notification_example.rs`](zel_core/examples/notification_example.rs)** - Client-to-server streaming
-- **[`raw_stream_example.rs`](zel_core/examples/raw_stream_example.rs)** - Custom bidirectional protocol (file transfer)
+**Quick Start**: [`macro_service_example.rs`](zel_core/examples/macro_service_example.rs)

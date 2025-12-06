@@ -1,18 +1,14 @@
-use anyhow::Context;
-use bytes::Bytes;
-use futures::{SinkExt, StreamExt};
 use iroh::{
     endpoint::{Connection, RecvStream, SendStream},
     protocol::ProtocolHandler,
 };
-use log::{trace, warn};
+use log::trace;
 use std::future::Future;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
-use super::error_classification::{ErrorClassificationExt, ErrorSeverity as ErrorSeverityType};
 use super::extensions::Extensions;
-use super::types::{Request, Response, SubscriptionMsg};
-use super::{RequestContext, ResourceError, ResourceResponse, ServiceMap};
+use super::handlers::*;
+use super::{ResourceError, ServiceMap};
 
 // Lowest level will establish a bidi connection and dispatch all requests
 // to child services
@@ -175,34 +171,10 @@ async fn handle_stream(
     let mut tx = FramedWrite::new(tx, LengthDelimitedCodec::new());
     let mut rx = FramedRead::new(rx, LengthDelimitedCodec::new());
 
-    // Read ONE request from THIS stream
-    let req_bytes = match rx.next().await {
-        Some(Ok(bytes)) => bytes,
-        Some(Err(e)) => {
-            log::error!(
-                "Failed to read request from peer {}: {e}",
-                connection.remote_id()
-            );
-            return Err(e.into());
-        }
-        None => {
-            log::warn!(
-                "Stream closed by peer {} before sending request",
-                connection.remote_id()
-            );
-            return Ok(());
-        }
-    };
-
-    let request: Request = match serde_json::from_slice(&req_bytes) {
-        Ok(req) => req,
-        Err(e) => {
-            log::error!(
-                "Peer {} sent malformed request: {e}",
-                connection.remote_id()
-            );
-            return Err(e.into());
-        }
+    // Read and deserialize request
+    let request = match read_and_deserialize_request(&mut rx, &connection).await? {
+        Some(req) => req,
+        None => return Ok(()),
     };
 
     // Route to service
@@ -210,10 +182,7 @@ async fn handle_stream(
         let error = ResourceError::ServiceNotFound {
             service: request.service.clone(),
         };
-        let response: Result<Response, ResourceError> = Err(error);
-        if let Ok(response_bytes) = serde_json::to_vec(&response) {
-            let _ = tx.send(response_bytes.into()).await;
-        }
+        send_error_response(&mut tx, error).await;
         return Ok(());
     };
 
@@ -223,358 +192,68 @@ async fn handle_stream(
             service: request.service.clone(),
             resource: request.resource.clone(),
         };
-        let response: Result<Response, ResourceError> = Err(error);
-        if let Ok(response_bytes) = serde_json::to_vec(&response) {
-            let _ = tx.send(response_bytes.into()).await;
-        }
+        send_error_response(&mut tx, error).await;
         return Ok(());
     };
 
-    // Handle based on resource type
+    // Dispatch to appropriate handler based on resource type
     match resource {
         super::ResourceCallback::Rpc(callback) => {
-            // Build RequestContext with all three extension tiers
-            let mut ctx = RequestContext::new(
-                connection.clone(),
-                endpoint.clone(),
-                request.service.clone(),
-                request.resource.clone(),
-                server_extensions.clone(),
-                connection_extensions.clone(),
+            handle_rpc(
+                callback.clone(),
+                request,
+                &mut tx,
+                &connection,
+                endpoint,
+                server_extensions,
+                connection_extensions,
+                request_middleware.clone(),
                 shutdown_signal.clone(),
-            );
-
-            // Apply request middleware chain
-            for middleware in &request_middleware {
-                ctx = middleware(ctx).await;
-            }
-
-            // Execute handler with circuit breaker protection
-            let response: ResourceResponse = if let Some(cb) = &circuit_breakers {
-                let peer_id = connection.remote_id();
-                let ctx_clone = ctx.clone();
-                let req_clone = request.clone();
-                let callback_clone = callback.clone();
-
-                match cb
-                    .call_async(&peer_id, || async move {
-                        (callback_clone)(ctx_clone, req_clone).await.map_err(|e| {
-                            // Preserve severity when converting ResourceError to anyhow::Error
-                            let severity = e.severity();
-                            let err = anyhow::anyhow!("{}", e);
-                            match severity {
-                                ErrorSeverityType::Application => err.as_application(),
-                                ErrorSeverityType::Infrastructure => err.as_infrastructure(),
-                                ErrorSeverityType::SystemFailure => err.as_system_failure(),
-                            }
-                        })
-                    })
-                    .await
-                {
-                    Ok(resp) => Ok(resp),
-                    Err(circuitbreaker_rs::BreakerError::Open) => {
-                        Err(ResourceError::CircuitBreakerOpen {
-                            peer_id: peer_id.to_string(),
-                        })
-                    }
-                    Err(circuitbreaker_rs::BreakerError::Operation(e)) => {
-                        // ServiceError has .severity() method - preserve it!
-                        Err(ResourceError::CallbackError {
-                            message: e.to_string(),
-                            severity: e.severity(),
-                            context: None,
-                        })
-                    }
-                    Err(e) => Err(ResourceError::CallbackError {
-                        message: e.to_string(),
-                        severity: ErrorSeverityType::Application,
-                        context: None,
-                    }),
-                }
-            } else {
-                (callback)(ctx, request).await
-            };
-
-            let response = match response {
-                Ok(r) => Ok(r),
-                Err(e) => Err(e),
-            };
-
-            let response_bytes = match serde_json::to_vec(&response) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    let error = ResourceError::SerializationError(e.to_string());
-                    serde_json::to_vec(&Err::<Response, _>(error)).context(
-                        "failed to serialize error response something really bad is happening",
-                    )?
-                }
-            };
-
-            if let Err(e) = tx.send(response_bytes.into()).await {
-                log::error!(
-                    "failed to send RPC response to peer {}: {e}",
-                    connection.remote_id()
-                );
-            }
-
-            // Stream will auto-close when this function returns
+                circuit_breakers.clone(),
+            )
+            .await
         }
         super::ResourceCallback::SubscriptionProducer(callback) => {
-            // Open uni stream for subscription
-            let Ok(sub_tx) = connection.open_uni().await else {
-                let error = ResourceError::CallbackError {
-                    message: "Failed to establish stream".into(),
-                    severity: ErrorSeverityType::Application,
-                    context: None,
-                };
-                let response: Result<Response, ResourceError> = Err(error);
-                if let Ok(response_bytes) = serde_json::to_vec(&response) {
-                    let _ = tx.send(response_bytes.into()).await;
-                }
-                return Ok(());
-            };
-
-            let ldc = LengthDelimitedCodec::new();
-            let mut sub_tx = FramedWrite::new(sub_tx, ldc);
-
-            // Send established ack on uni stream
-            let ack = SubscriptionMsg::Established {
-                service: request.service.clone(),
-                resource: request.resource.clone(),
-            };
-            let ack = serde_json::to_vec(&ack)
-                .context("failed to serialize ack message something really bad is happening")?;
-            if let Err(e) = sub_tx.send(ack.into()).await {
-                log::error!(
-                    "attempted to send subscription ack to peer {} but failed {e}",
-                    connection.remote_id()
-                );
-                let error = ResourceError::CallbackError {
-                    message: format!("Failed to send ack: {e}"),
-                    severity: ErrorSeverityType::Application,
-                    context: None,
-                };
-                let response: Result<Response, ResourceError> = Err(error);
-                if let Ok(response_bytes) = serde_json::to_vec(&response) {
-                    let _ = tx.send(response_bytes.into()).await;
-                }
-                return Ok(());
-            }
-
-            // Send success response on request stream
-            let response: Result<Response, ResourceError> = Ok(Response { data: Bytes::new() });
-            let response_bytes = serde_json::to_vec(&response)
-                .context("failed to serialize response something really bad is happening")?;
-            if let Err(e) = tx.send(response_bytes.into()).await {
-                log::error!(
-                    "failed to send subscription response to peer {}: {e}",
-                    connection.remote_id()
-                );
-                return Ok(());
-            }
-
-            // Spawn publisher task
-            let callback = callback.to_owned();
-            let conn_clone = connection.clone();
-            let endpoint_clone = endpoint.clone();
-            let server_ext_clone = server_extensions.clone();
-            let conn_ext_clone = connection_extensions.clone();
-            let middleware_clone = request_middleware.clone();
-            let shutdown_sig_clone = shutdown_signal.clone();
-
-            tokio::spawn(async move {
-                let peer = conn_clone.remote_id();
-
-                // Build RequestContext for subscription
-                let mut ctx = RequestContext::new(
-                    conn_clone,
-                    endpoint_clone,
-                    request.service.clone(),
-                    request.resource.clone(),
-                    server_ext_clone,
-                    conn_ext_clone,
-                    shutdown_sig_clone,
-                );
-
-                // Apply request middleware chain
-                for middleware in &middleware_clone {
-                    ctx = middleware(ctx).await;
-                }
-
-                if let Err(e) = (callback)(ctx, request, sub_tx).await {
-                    warn!("subscription task for peer {} failed {e}", peer);
-                }
-            });
+            handle_subscription(
+                callback.clone(),
+                request,
+                &mut tx,
+                &connection,
+                endpoint,
+                server_extensions,
+                connection_extensions,
+                request_middleware.clone(),
+                shutdown_signal.clone(),
+            )
+            .await
         }
         super::ResourceCallback::NotificationConsumer(callback) => {
-            // Open bidirectional stream for notification (client sends, server acks)
-            let Ok((notif_tx, notif_rx)) = connection.open_bi().await else {
-                let error = ResourceError::CallbackError {
-                    message: "Failed to establish notification stream".into(),
-                    severity: ErrorSeverityType::Application,
-                    context: None,
-                };
-                let response: Result<Response, ResourceError> = Err(error);
-                if let Ok(response_bytes) = serde_json::to_vec(&response) {
-                    let _ = tx.send(response_bytes.into()).await;
-                }
-                return Ok(());
-            };
-
-            let ldc = LengthDelimitedCodec::new();
-            let mut notif_tx = FramedWrite::new(notif_tx, ldc);
-            let notif_rx = FramedRead::new(notif_rx, LengthDelimitedCodec::new());
-
-            // Send established ack on notification stream
-            let ack = super::NotificationMsg::Established {
-                service: request.service.clone(),
-                resource: request.resource.clone(),
-            };
-            let ack =
-                serde_json::to_vec(&ack).context("failed to serialize notification ack message")?;
-            if let Err(e) = notif_tx.send(ack.into()).await {
-                log::error!(
-                    "attempted to send notification ack to peer {} but failed {e}",
-                    connection.remote_id()
-                );
-                let error = ResourceError::CallbackError {
-                    message: format!("Failed to send ack: {e}"),
-                    severity: ErrorSeverityType::Application,
-                    context: None,
-                };
-                let response: Result<Response, ResourceError> = Err(error);
-                if let Ok(response_bytes) = serde_json::to_vec(&response) {
-                    let _ = tx.send(response_bytes.into()).await;
-                }
-                return Ok(());
-            }
-
-            // Send success response on request stream
-            let response: Result<Response, ResourceError> = Ok(Response { data: Bytes::new() });
-            let response_bytes = serde_json::to_vec(&response)
-                .context("failed to serialize notification response")?;
-            if let Err(e) = tx.send(response_bytes.into()).await {
-                log::error!(
-                    "failed to send notification response to peer {}: {e}",
-                    connection.remote_id()
-                );
-                return Ok(());
-            }
-
-            // Spawn notification consumer task
-            let callback = callback.to_owned();
-            let conn_clone = connection.clone();
-            let endpoint_clone = endpoint.clone();
-            let server_ext_clone = server_extensions.clone();
-            let conn_ext_clone = connection_extensions.clone();
-            let middleware_clone = request_middleware.clone();
-            let shutdown_sig_clone = shutdown_signal.clone();
-
-            tokio::spawn(async move {
-                let peer = conn_clone.remote_id();
-
-                // Build RequestContext for notification
-                let mut ctx = RequestContext::new(
-                    conn_clone,
-                    endpoint_clone,
-                    request.service.clone(),
-                    request.resource.clone(),
-                    server_ext_clone,
-                    conn_ext_clone,
-                    shutdown_sig_clone,
-                );
-
-                // Apply request middleware chain
-                for middleware in &middleware_clone {
-                    ctx = middleware(ctx).await;
-                }
-
-                if let Err(e) = (callback)(ctx, request, notif_rx, notif_tx).await {
-                    warn!("notification consumer task for peer {} failed {e}", peer);
-                }
-            });
+            handle_notification(
+                callback.clone(),
+                request,
+                &mut tx,
+                &connection,
+                endpoint,
+                server_extensions,
+                connection_extensions,
+                request_middleware.clone(),
+                shutdown_signal.clone(),
+            )
+            .await
         }
         super::ResourceCallback::StreamHandler(callback) => {
-            // Open new bidirectional stream for raw stream handler
-            let Ok((mut stream_tx, stream_rx)) = connection.open_bi().await else {
-                let error = ResourceError::CallbackError {
-                    message: "Failed to open bidi stream".into(),
-                    severity: ErrorSeverityType::Application,
-                    context: None,
-                };
-                let response: Result<Response, ResourceError> = Err(error);
-                if let Ok(response_bytes) = serde_json::to_vec(&response) {
-                    let _ = tx.send(response_bytes.into()).await;
-                }
-                return Ok(());
-            };
-
-            // CRITICAL: Must write to stream BEFORE client accept_bi() will succeed
-            // Send a simple ACK byte to establish the stream
-            if let Err(e) = stream_tx.write_all(b"OK").await {
-                log::error!(
-                    "failed to send stream ACK to peer {}: {e}",
-                    connection.remote_id()
-                );
-                let error = ResourceError::CallbackError {
-                    message: format!("Failed to send stream ACK: {e}"),
-                    severity: ErrorSeverityType::Application,
-                    context: None,
-                };
-                let response: Result<Response, ResourceError> = Err(error);
-                if let Ok(response_bytes) = serde_json::to_vec(&response) {
-                    let _ = tx.send(response_bytes.into()).await;
-                }
-                return Ok(());
-            };
-
-            // Send success response on request stream
-            let response: Result<Response, ResourceError> = Ok(Response { data: Bytes::new() });
-            let response_bytes = serde_json::to_vec(&response)
-                .context("failed to serialize response something really bad is happening")?;
-            if let Err(e) = tx.send(response_bytes.into()).await {
-                log::error!(
-                    "failed to send stream response to peer {}: {e}",
-                    connection.remote_id()
-                );
-                return Ok(());
-            }
-
-            // Spawn stream handler task with RAW streams (no codec wrapping)
-            let callback = callback.to_owned();
-            let conn_clone = connection.clone();
-            let endpoint_clone = endpoint.clone();
-            let server_ext_clone = server_extensions.clone();
-            let conn_ext_clone = connection_extensions.clone();
-            let middleware_clone = request_middleware.clone();
-            let shutdown_sig_clone = shutdown_signal.clone();
-
-            tokio::spawn(async move {
-                let peer = conn_clone.remote_id();
-
-                // Build RequestContext for stream handler
-                let mut ctx = RequestContext::new(
-                    conn_clone,
-                    endpoint_clone,
-                    request.service.clone(),
-                    request.resource.clone(),
-                    server_ext_clone,
-                    conn_ext_clone,
-                    shutdown_sig_clone,
-                );
-
-                // Apply request middleware chain
-                for middleware in &middleware_clone {
-                    ctx = middleware(ctx).await;
-                }
-
-                // Call handler with raw streams - no framing/codec
-                if let Err(e) = (callback)(ctx, request, stream_tx, stream_rx).await {
-                    warn!("stream handler task for peer {} failed {e}", peer);
-                }
-            });
+            handle_stream_handler(
+                callback.clone(),
+                request,
+                &mut tx,
+                &connection,
+                endpoint,
+                server_extensions,
+                connection_extensions,
+                request_middleware.clone(),
+                shutdown_signal.clone(),
+            )
+            .await
         }
     }
-
-    Ok(())
 }

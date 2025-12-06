@@ -1,7 +1,11 @@
-//! Example of notifications (client-to-server streaming)
+//! # Example: Notifications
 //!
-//! Shows notification feature where clients push events to the server
-//! over time with acknowledgments.
+//! Demonstrates client-to-server streaming (notifications).
+//! Features: Typed receiver/sender, acks, stats updates.
+//!
+//! Run: `cargo run --example notification_example`
+//!
+//! Expected: Client sends events, server processes/acks, stats query.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
