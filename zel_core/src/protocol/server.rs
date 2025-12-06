@@ -9,11 +9,10 @@ use log::{trace, warn};
 use std::future::Future;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
-use crate::protocol::{
-    error_classification::ErrorSeverity as ErrorSeverityType, ErrorClassificationExt, Extensions,
-    Request, RequestContext, ResourceError, ResourceResponse, Response, ServiceMap,
-    SubscriptionMsg,
-};
+use super::error_classification::{ErrorClassificationExt, ErrorSeverity as ErrorSeverityType};
+use super::extensions::Extensions;
+use super::types::{Request, Response, SubscriptionMsg};
+use super::{RequestContext, ResourceError, ResourceResponse, ServiceMap};
 
 // Lowest level will establish a bidi connection and dispatch all requests
 // to child services
