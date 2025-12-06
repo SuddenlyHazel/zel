@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zel_core::protocol::{zel_service, Extensions, RequestContext, RpcServerBuilder};
 use zel_core::IrohBundle;
+use zel_types::ResourceError;
 
 // Global trace ID counter
 static TRACE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -147,15 +148,15 @@ struct UserId {
 trait UserService {
     /// Create a new user (demonstrates all three extension tiers)
     #[method(name = "create")]
-    async fn create_user(&self, user: UserData) -> Result<UserId, String>;
+    async fn create_user(&self, user: UserData) -> Result<UserId, ResourceError>;
 
     /// Get user info (demonstrates permission checking)
     #[method(name = "get")]
-    async fn get_user(&self, user_id: String) -> Result<UserData, String>;
+    async fn get_user(&self, user_id: String) -> Result<UserData, ResourceError>;
 
     /// Get server stats (demonstrates server extensions)
     #[method(name = "stats")]
-    async fn get_stats(&self) -> Result<String, String>;
+    async fn get_stats(&self) -> Result<String, ResourceError>;
 }
 
 // ============================================================================
@@ -167,39 +168,49 @@ struct UserServiceImpl;
 
 #[async_trait]
 impl UserServiceServer for UserServiceImpl {
-    async fn create_user(&self, ctx: RequestContext, user: UserData) -> Result<UserId, String> {
+    async fn create_user(
+        &self,
+        ctx: RequestContext,
+        user: UserData,
+    ) -> Result<UserId, ResourceError> {
         // Access SERVER extensions (shared across all connections)
         let db_pool = ctx
             .server_extensions()
             .get::<DatabasePool>()
-            .ok_or("Database pool not configured")?;
+            .ok_or_else(|| ResourceError::app("Database pool not configured"))?;
 
         let config = ctx
             .server_extensions()
             .get::<Arc<ServerConfig>>()
-            .ok_or("Server config not found")?;
+            .ok_or_else(|| ResourceError::app("Server config not found"))?;
 
         let counter = ctx
             .server_extensions()
             .get::<Arc<RequestCounter>>()
-            .ok_or("Request counter not found")?;
+            .ok_or_else(|| ResourceError::app("Request counter not found"))?;
 
         // Access CONNECTION extensions (per-connection session)
         let session = ctx
             .connection_extensions()
             .get::<UserSession>()
-            .ok_or("User not authenticated")?;
+            .ok_or_else(|| ResourceError::app("User not authenticated"))?;
 
         // Check permissions
         if !session.has_permission("write") {
-            return Err("Insufficient permissions".to_string());
+            return Err(ResourceError::app("Insufficient permissions"));
         }
 
         println!("  Authenticated as: {} (CONNECTION ext)", session.user_id);
 
         // Access REQUEST extensions (per-request trace ID and timing)
-        let trace_id = ctx.extensions().get::<TraceId>().ok_or("No trace ID")?;
-        let timing = ctx.extensions().get::<RequestTiming>().ok_or("No timing")?;
+        let trace_id = ctx
+            .extensions()
+            .get::<TraceId>()
+            .ok_or_else(|| ResourceError::app("No trace ID"))?;
+        let timing = ctx
+            .extensions()
+            .get::<RequestTiming>()
+            .ok_or_else(|| ResourceError::app("No timing"))?;
 
         let req_num = counter.increment();
 
@@ -219,7 +230,7 @@ impl UserServiceServer for UserServiceImpl {
             .bind(&user.email)
             .execute(&*db_pool)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| ResourceError::system(e.to_string()))?;
 
         let user_id = result.last_insert_rowid();
         println!("[DB] Inserted user with ID: {}", user_id);
@@ -232,26 +243,30 @@ impl UserServiceServer for UserServiceImpl {
         })
     }
 
-    async fn get_user(&self, ctx: RequestContext, user_id: String) -> Result<UserData, String> {
+    async fn get_user(
+        &self,
+        ctx: RequestContext,
+        user_id: String,
+    ) -> Result<UserData, ResourceError> {
         // Check authentication
         let session = ctx
             .connection_extensions()
             .get::<UserSession>()
-            .ok_or("Not authenticated")?;
+            .ok_or_else(|| ResourceError::app("Not authenticated"))?;
 
         if !session.has_permission("read") {
-            return Err("Insufficient permissions".to_string());
+            return Err(ResourceError::app("Insufficient permissions"));
         }
 
         let db_pool = ctx
             .server_extensions()
             .get::<DatabasePool>()
-            .ok_or("Database pool not configured")?;
+            .ok_or_else(|| ResourceError::app("Database pool not configured"))?;
 
         let counter = ctx
             .server_extensions()
             .get::<Arc<RequestCounter>>()
-            .ok_or("Request counter not found")?;
+            .ok_or_else(|| ResourceError::app("Request counter not found"))?;
 
         let trace_id = ctx.extensions().get::<TraceId>();
         let req_num = counter.increment();
@@ -267,12 +282,14 @@ impl UserServiceServer for UserServiceImpl {
         println!("  Global Request Count: {} (SERVER ext)", req_num);
 
         // Query user from database
-        let user_id_i64: i64 = user_id.parse().map_err(|_| "Invalid user ID")?;
+        let user_id_i64: i64 = user_id
+            .parse()
+            .map_err(|_| ResourceError::app("Invalid user ID"))?;
         let row = sqlx::query("SELECT name, email FROM users WHERE id = ?")
             .bind(user_id_i64)
             .fetch_one(&*db_pool)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| ResourceError::system(e.to_string()))?;
 
         let name: String = row.get(0);
         let email: String = row.get(1);
@@ -282,11 +299,11 @@ impl UserServiceServer for UserServiceImpl {
         Ok(UserData { name, email })
     }
 
-    async fn get_stats(&self, ctx: RequestContext) -> Result<String, String> {
+    async fn get_stats(&self, ctx: RequestContext) -> Result<String, ResourceError> {
         let counter = ctx
             .server_extensions()
             .get::<Arc<RequestCounter>>()
-            .ok_or("Request counter not found")?;
+            .ok_or_else(|| ResourceError::app("Request counter not found"))?;
 
         let session = ctx.connection_extensions().get::<UserSession>();
         let req_num = counter.increment();

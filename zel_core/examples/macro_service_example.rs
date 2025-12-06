@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use zel_core::protocol::{zel_service, RequestContext, RpcServerBuilder};
 use zel_core::IrohBundle;
+use zel_types::ResourceError;
 
 #[derive(Serialize, Deserialize)]
 pub struct CounterMsg {
@@ -16,15 +17,15 @@ pub struct CounterMsg {
 trait Calculator {
     /// Add two numbers
     #[method(name = "add")]
-    async fn add(&self, a: i32, b: i32) -> Result<i32, String>;
+    async fn add(&self, a: i32, b: i32) -> Result<i32, ResourceError>;
 
     /// Multiply two numbers
     #[method(name = "multiply")]
-    async fn multiply(&self, a: i32, b: i32) -> Result<i32, String>;
+    async fn multiply(&self, a: i32, b: i32) -> Result<i32, ResourceError>;
 
     /// Subscribe to a counter
     #[subscription(name = "counter", item = "CounterMsg")]
-    async fn counter(&self, interval_ms: u64) -> Result<(), String>;
+    async fn counter(&self, interval_ms: u64) -> Result<(), ResourceError>;
 }
 
 // Implement the generated server trait
@@ -33,12 +34,12 @@ struct CalculatorImpl;
 
 #[async_trait]
 impl CalculatorServer for CalculatorImpl {
-    async fn add(&self, ctx: RequestContext, a: i32, b: i32) -> Result<i32, String> {
+    async fn add(&self, ctx: RequestContext, a: i32, b: i32) -> Result<i32, ResourceError> {
         log::info!("add called from peer: {}", ctx.remote_id());
         Ok(a + b)
     }
 
-    async fn multiply(&self, ctx: RequestContext, a: i32, b: i32) -> Result<i32, String> {
+    async fn multiply(&self, ctx: RequestContext, a: i32, b: i32) -> Result<i32, ResourceError> {
         log::info!("multiply called from peer: {}", ctx.remote_id());
         Ok(a * b)
     }
@@ -48,7 +49,7 @@ impl CalculatorServer for CalculatorImpl {
         ctx: RequestContext,
         mut sink: CalculatorCounterSink,
         interval_ms: u64,
-    ) -> Result<(), String> {
+    ) -> Result<(), ResourceError> {
         log::info!("counter subscription from peer: {}", ctx.remote_id());
 
         // Set high priority for this subscription stream

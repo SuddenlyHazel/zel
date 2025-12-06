@@ -1,5 +1,5 @@
 [workspace]
-members = ["zel_core", "zel_macros"]
+members = ["zel_core", "zel_macros", "zel_types"]
 resolver = "2"
 
 [workspace.package]

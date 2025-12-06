@@ -184,44 +184,27 @@ pub enum ResourceCallback {
     StreamHandler(StreamHandler),
 }
 
-#[derive(thiserror::Error, Debug, Serialize, Deserialize)]
-pub enum ResourceError {
-    #[error("Service '{service}' not found")]
-    ServiceNotFound { service: String },
+// Shared protocol error types re-exported from `zel_types` so that both
+// `zel_core` and `zel_macros` can agree on the same surface.
+pub use zel_types::{ErrorSeverity as ResourceErrorSeverity, ResourceError};
 
-    #[error("Resource '{resource}' not found in service '{service}'")]
-    ResourceNotFound { service: String, resource: String },
-
-    // BREAKING CHANGE: Now structured with severity + optional context
-    #[error("Callback execution failed: {message}")]
-    CallbackError {
-        message: String,
-        severity: ErrorSeverityType,
-        /// Optional structured context - users can provide custom error details
-        /// This is serialized as JSON, allowing any `Serialize` type
-        #[serde(skip_serializing_if = "Option::is_none")]
-        context: Option<serde_json::Value>,
-    },
-
-    #[error("Serialization error: {0}")]
-    SerializationError(String),
-
-    #[error("Circuit breaker open for peer {peer_id}")]
-    CircuitBreakerOpen { peer_id: String },
+pub trait ResourceResultExt<T> {
+    fn to_app_error(self) -> Result<T, ResourceError>;
+    fn to_infra_error(self) -> Result<T, ResourceError>;
+    fn to_system_error(self) -> Result<T, ResourceError>;
 }
 
-impl ResourceError {
-    /// Extract severity from error for circuit breaker classification
-    pub fn severity(&self) -> ErrorSeverityType {
-        match self {
-            ResourceError::CallbackError { severity, .. } => *severity,
-            // Circuit breaker errors are always infrastructure failures
-            ResourceError::CircuitBreakerOpen { .. } => ErrorSeverityType::Infrastructure,
-            // Other error types default to application errors (safe default)
-            ResourceError::ServiceNotFound { .. }
-            | ResourceError::ResourceNotFound { .. }
-            | ResourceError::SerializationError(_) => ErrorSeverityType::Application,
-        }
+impl<T> ResourceResultExt<T> for Result<T, anyhow::Error> {
+    fn to_app_error(self) -> Result<T, ResourceError> {
+        self.map_err(ResourceError::app)
+    }
+
+    fn to_infra_error(self) -> Result<T, ResourceError> {
+        self.map_err(ResourceError::infra)
+    }
+
+    fn to_system_error(self) -> Result<T, ResourceError> {
+        self.map_err(ResourceError::system)
     }
 }
 
@@ -666,12 +649,14 @@ mod tests {
         // Test CallbackError
         let error = ResourceError::CallbackError {
             message: "test error".to_string(),
-            severity: ErrorSeverityType::Application,
+            severity: ResourceErrorSeverity::Application,
             context: None,
         };
         let json = serde_json::to_string(&error).unwrap();
         let deserialized: ResourceError = serde_json::from_str(&json).unwrap();
-        assert!(matches!(deserialized, ResourceError::CallbackError { message, .. } if message == "test error"));
+        assert!(
+            matches!(deserialized, ResourceError::CallbackError { message, .. } if message == "test error")
+        );
 
         // Test SerializationError
         let error = ResourceError::SerializationError("test error".to_string());
@@ -757,7 +742,7 @@ mod tests {
         // Test error response
         let response: ResourceResponse = Err(ResourceError::CallbackError {
             message: "test".to_string(),
-            severity: ErrorSeverityType::Application,
+            severity: ResourceErrorSeverity::Application,
             context: None,
         });
         let json = serde_json::to_string(&response).unwrap();
