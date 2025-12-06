@@ -216,7 +216,7 @@
 //! - **Background tasks**: Higher thresholds (more tolerant)
 //! - **External APIs**: Longer timeouts (may be temporarily unavailable)
 
-use circuitbreaker_rs::{BreakerError, CircuitBreaker, DefaultPolicy, State as BreakerState};
+use circuitbreaker_rs::{BreakerError, CircuitBreaker, DefaultPolicy};
 use iroh::PublicKey;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -286,19 +286,19 @@ impl PeerCircuitBreakers {
                 .clone()
         };
 
-        let classifier = self.classifier.clone();
+        //let classifier = self.classifier.clone();
 
         // Double-Result wrapper pattern:
         // - Ok(Ok(T)) = success
         // - Ok(Err(ServiceError)) = application error (bypasses circuit tracking)
         // - Err(ServiceError) = severe error (trips circuit)
-        let classifier = self.classifier.clone();
+        let _classifier = self.classifier.clone();
         let result = breaker
             .call_async(|| async {
                 match operation().await {
                     Ok(value) => Ok(Ok(value)),
                     Err(e) => {
-                        let severity = classifier.classify(&e);
+                        let severity = _classifier.classify(&e);
                         let message = e.to_string();
                         let service_error = ServiceError::from_severity_and_msg(severity, message);
 
