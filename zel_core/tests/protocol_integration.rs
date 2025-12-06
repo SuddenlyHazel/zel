@@ -3,6 +3,7 @@ use futures::{SinkExt, StreamExt};
 use std::time::Duration;
 use zel_core::protocol::{
     client::{ClientError, RpcClient},
+    error_classification::ErrorSeverity as ErrorSeverityType,
     Body, ResourceError, Response, RpcServerBuilder, SubscriptionMsg,
 };
 use zel_core::IrohBundle;
@@ -18,8 +19,12 @@ async fn test_basic_rpc_call() {
             Box::pin(async move {
                 // Parse the body as two numbers
                 if let Body::Rpc(data) = &req.body {
-                    let numbers: Vec<i32> = serde_json::from_slice(data)
-                        .map_err(|e| ResourceError::CallbackError(e.to_string()))?;
+                    let numbers: Vec<i32> =
+                        serde_json::from_slice(data).map_err(|e| ResourceError::CallbackError {
+                            message: e.to_string(),
+                            severity: ErrorSeverityType::Application,
+                            context: None,
+                        })?;
                     let sum = numbers.iter().sum::<i32>();
                     let result = serde_json::to_vec(&sum)
                         .map_err(|e| ResourceError::SerializationError(e.to_string()))?;
@@ -27,7 +32,11 @@ async fn test_basic_rpc_call() {
                         data: Bytes::from(result),
                     })
                 } else {
-                    Err(ResourceError::CallbackError("Expected RPC body".into()))
+                    Err(ResourceError::CallbackError {
+                        message: "Expected RPC body".into(),
+                        severity: ErrorSeverityType::Application,
+                        context: None,
+                    })
                 }
             })
         })

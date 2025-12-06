@@ -25,30 +25,54 @@ use iroh::{
     Endpoint,
 };
 use serde::{Deserialize, Serialize};
+use serde_json;
 use tokio::time::Duration;
 use tokio_util::codec::{FramedWrite, LengthDelimitedCodec};
 
+pub mod circuit_breaker;
+pub mod circuit_breaker_stats;
 pub mod client;
 pub mod context;
+pub mod error_classification;
 pub mod extensions;
+pub mod retry;
+pub mod retry_metrics;
 pub mod server;
 pub mod shutdown;
 
 // Re-export the procedural macro
 pub use zel_macros::zel_service;
 
+// Re-export circuit breaker types
+pub use circuit_breaker::{
+    CircuitBreakerConfig, CircuitBreakerConfigBuilder, CircuitState, PeerCircuitBreakers,
+};
+pub use circuit_breaker_stats::CircuitBreakerStats;
+
 // Re-export client types for generated code
 pub use client::{ClientError, NotificationSender, RpcClient, SubscriptionStream};
 
 // Re-export new context types
 pub use context::RequestContext;
+
+// Re-export error classification types
+pub use error_classification::{ErrorClassificationExt, ErrorClassifier, ErrorSeverity};
+
+// Also import ErrorSeverity for use in this module
+use error_classification::ErrorSeverity as ErrorSeverityType;
+
+// Re-export extensions
 pub use extensions::Extensions;
+
+// Re-export retry types
+pub use retry::{ErrorPredicate, RetryConfig, RetryConfigBuilder};
+pub use retry_metrics::RetryMetrics;
 
 // Re-export shutdown types
 pub use shutdown::TaskTracker;
 
 /// Request body type indicating the endpoint type and optional parameters.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Body {
     /// Subscription request (server-to-client streaming)
     Subscribe,
@@ -61,7 +85,7 @@ pub enum Body {
 }
 
 /// RPC request containing service name, resource name, and body.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     /// The service name to route to
     pub service: String,
@@ -107,6 +131,9 @@ pub struct RpcServer<'a> {
     connection_hook: Option<ConnectionHook>,
     request_middleware: Vec<RequestMiddleware>,
 
+    // Circuit breaker for per-peer protection
+    circuit_breakers: Option<Arc<PeerCircuitBreakers>>,
+
     // Shutdown coordination
     shutdown_signal: Arc<tokio::sync::Notify>,
     is_shutting_down: Arc<AtomicBool>,
@@ -128,6 +155,7 @@ impl<'a> std::fmt::Debug for RpcServer<'a> {
                     .map(|_| "Some(ConnectionHook)"),
             )
             .field("request_middleware_count", &self.request_middleware.len())
+            .field("circuit_breakers_enabled", &self.circuit_breakers.is_some())
             .finish()
     }
 }
@@ -164,11 +192,37 @@ pub enum ResourceError {
     #[error("Resource '{resource}' not found in service '{service}'")]
     ResourceNotFound { service: String, resource: String },
 
-    #[error("Callback execution failed: {0}")]
-    CallbackError(String),
+    // BREAKING CHANGE: Now structured with severity + optional context
+    #[error("Callback execution failed: {message}")]
+    CallbackError {
+        message: String,
+        severity: ErrorSeverityType,
+        /// Optional structured context - users can provide custom error details
+        /// This is serialized as JSON, allowing any `Serialize` type
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context: Option<serde_json::Value>,
+    },
 
     #[error("Serialization error: {0}")]
     SerializationError(String),
+
+    #[error("Circuit breaker open for peer {peer_id}")]
+    CircuitBreakerOpen { peer_id: String },
+}
+
+impl ResourceError {
+    /// Extract severity from error for circuit breaker classification
+    pub fn severity(&self) -> ErrorSeverityType {
+        match self {
+            ResourceError::CallbackError { severity, .. } => *severity,
+            // Circuit breaker errors are always infrastructure failures
+            ResourceError::CircuitBreakerOpen { .. } => ErrorSeverityType::Infrastructure,
+            // Other error types default to application errors (safe default)
+            ResourceError::ServiceNotFound { .. }
+            | ResourceError::ResourceNotFound { .. }
+            | ResourceError::SerializationError(_) => ErrorSeverityType::Application,
+        }
+    }
 }
 
 impl Debug for ResourceCallback {
@@ -610,10 +664,14 @@ mod tests {
         );
 
         // Test CallbackError
-        let error = ResourceError::CallbackError("test error".to_string());
+        let error = ResourceError::CallbackError {
+            message: "test error".to_string(),
+            severity: ErrorSeverityType::Application,
+            context: None,
+        };
         let json = serde_json::to_string(&error).unwrap();
         let deserialized: ResourceError = serde_json::from_str(&json).unwrap();
-        assert!(matches!(deserialized, ResourceError::CallbackError(msg) if msg == "test error"));
+        assert!(matches!(deserialized, ResourceError::CallbackError { message, .. } if message == "test error"));
 
         // Test SerializationError
         let error = ResourceError::SerializationError("test error".to_string());
@@ -697,7 +755,11 @@ mod tests {
         assert!(deserialized.is_ok());
 
         // Test error response
-        let response: ResourceResponse = Err(ResourceError::CallbackError("test".to_string()));
+        let response: ResourceResponse = Err(ResourceError::CallbackError {
+            message: "test".to_string(),
+            severity: ErrorSeverityType::Application,
+            context: None,
+        });
         let json = serde_json::to_string(&response).unwrap();
         let deserialized: ResourceResponse = serde_json::from_str(&json).unwrap();
         assert!(deserialized.is_err());
@@ -768,6 +830,7 @@ pub struct RpcServerBuilder<'a> {
     server_extensions: Extensions,
     connection_hook: Option<ConnectionHook>,
     request_middleware: Vec<RequestMiddleware>,
+    circuit_breaker_config: Option<CircuitBreakerConfig>,
 }
 
 impl<'a> RpcServerBuilder<'a> {
@@ -785,6 +848,7 @@ impl<'a> RpcServerBuilder<'a> {
             server_extensions: Extensions::new(),
             connection_hook: None,
             request_middleware: Vec::new(),
+            circuit_breaker_config: None,
         }
     }
 
@@ -821,6 +885,50 @@ impl<'a> RpcServerBuilder<'a> {
         self
     }
 
+    /// Enable circuit breaker protection with the given configuration
+    ///
+    /// This adds per-peer circuit breakers to protect the server from
+    /// misbehaving clients.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use zel_core::protocol::{RpcServerBuilder, CircuitBreakerConfig};
+    /// use std::time::Duration;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let endpoint = iroh::Endpoint::builder().bind().await?;
+    /// let cb_config = CircuitBreakerConfig::builder()
+    ///     .failure_threshold(0.5)
+    ///     .consecutive_failures(5)
+    ///     .timeout(Duration::from_secs(30))
+    ///     .build();
+    ///
+    /// let server = RpcServerBuilder::new(b"myapp/1", endpoint)
+    ///     .with_circuit_breaker(cb_config)
+    ///     .build();
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_circuit_breaker(mut self, config: CircuitBreakerConfig) -> Self {
+        self.circuit_breaker_config = Some(config);
+        self
+    }
+
+    /// Initialize circuit breakers if configured.
+    ///
+    /// Returns a tuple of (optional circuit breaker, server extensions).
+    /// If circuit breaker is configured, stats are added to extensions.
+    fn initialize_circuit_breakers(&mut self) -> (Option<Arc<PeerCircuitBreakers>>, Extensions) {
+        if let Some(config) = self.circuit_breaker_config.take() {
+            let breakers = Arc::new(PeerCircuitBreakers::new(config));
+            let stats = CircuitBreakerStats::new(Arc::clone(&breakers));
+            let exts = self.server_extensions.clone().with(stats);
+            (Some(breakers), exts)
+        } else {
+            (None, self.server_extensions.clone())
+        }
+    }
+
     /// Begin defining a service
     ///
     /// # Arguments
@@ -833,14 +941,17 @@ impl<'a> RpcServerBuilder<'a> {
     }
 
     /// Build the RpcServer
-    pub fn build(self) -> RpcServer<'a> {
+    pub fn build(mut self) -> RpcServer<'a> {
+        let (circuit_breakers, server_extensions) = self.initialize_circuit_breakers();
+
         RpcServer {
             alpn: self.alpn,
             endpoint: self.endpoint,
             services: Arc::new(self.services),
-            server_extensions: self.server_extensions,
+            server_extensions,
             connection_hook: self.connection_hook,
             request_middleware: self.request_middleware,
+            circuit_breakers,
 
             // Initialize shutdown infrastructure
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
@@ -872,10 +983,12 @@ impl<'a> RpcServerBuilder<'a> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn build_with_shutdown(self) -> (RpcServer<'a>, ShutdownHandle) {
+    pub fn build_with_shutdown(mut self) -> (RpcServer<'a>, ShutdownHandle) {
         let shutdown_signal = Arc::new(tokio::sync::Notify::new());
         let is_shutting_down = Arc::new(AtomicBool::new(false));
         let task_tracker = TaskTracker::new();
+
+        let (circuit_breakers, server_extensions) = self.initialize_circuit_breakers();
 
         let handle = ShutdownHandle {
             shutdown_signal: Arc::clone(&shutdown_signal),
@@ -887,9 +1000,10 @@ impl<'a> RpcServerBuilder<'a> {
             alpn: self.alpn,
             endpoint: self.endpoint,
             services: Arc::new(self.services),
-            server_extensions: self.server_extensions,
+            server_extensions,
             connection_hook: self.connection_hook,
             request_middleware: self.request_middleware,
+            circuit_breakers,
             shutdown_signal,
             is_shutting_down,
             task_tracker,
