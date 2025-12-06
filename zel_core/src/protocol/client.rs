@@ -1,11 +1,16 @@
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use backon::{ExponentialBuilder, Retryable};
 use bytes::Bytes;
 use futures::{SinkExt, Stream, StreamExt};
 use iroh::endpoint::{Connection, RecvStream};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
+use crate::protocol::retry::RetryConfig;
+use crate::protocol::retry_metrics::RetryMetrics;
 use crate::protocol::{Body, Request, ResourceError, Response, SubscriptionMsg};
 
 /// Client for making RPC calls and subscriptions over Iroh.
@@ -51,6 +56,8 @@ use crate::protocol::{Body, Request, ResourceError, Response, SubscriptionMsg};
 #[derive(Clone)]
 pub struct RpcClient {
     connection: Connection,
+    retry_config: Option<RetryConfig>,
+    retry_metrics: Option<Arc<RetryMetrics>>,
 }
 
 /// Errors that can occur during client operations
@@ -73,9 +80,41 @@ pub enum ClientError {
 }
 
 impl RpcClient {
-    /// Create a new RPC client from an Iroh connection
+    /// Create a new builder for configuring an RPC client
+    ///
+    /// This is the preferred way to create a client if you want to enable retries.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use zel_core::protocol::{RpcClient, RetryConfig};
+    /// use std::time::Duration;
+    ///
+    /// # async fn example(connection: iroh::endpoint::Connection) -> Result<(), Box<dyn std::error::Error>> {
+    /// let retry_config = RetryConfig::builder()
+    ///     .max_attempts(3)
+    ///     .initial_backoff(Duration::from_millis(100))
+    ///     .build()?;
+    ///
+    /// let client = RpcClient::builder(connection)
+    ///     .with_retry_config(retry_config)
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn builder(connection: Connection) -> RpcClientBuilder {
+        RpcClientBuilder::new(connection)
+    }
+
+    /// Create a new RPC client from an Iroh connection without retry support
+    ///
+    /// For retry support, use [`RpcClient::builder()`] instead.
     pub async fn new(connection: Connection) -> Result<Self, ClientError> {
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            retry_config: None,
+            retry_metrics: None,
+        })
     }
 
     /// Get a reference to the underlying Iroh connection.
@@ -103,6 +142,23 @@ impl RpcClient {
         resource: impl Into<String>,
         body: Bytes,
     ) -> Result<Response, ClientError> {
+        let service = service.into();
+        let resource = resource.into();
+
+        if let Some(config) = &self.retry_config {
+            self.call_with_retry(service, resource, body, config).await
+        } else {
+            self.call_internal(service, resource, body).await
+        }
+    }
+
+    /// Internal call implementation without retry logic
+    async fn call_internal(
+        &self,
+        service: String,
+        resource: String,
+        body: Bytes,
+    ) -> Result<Response, ClientError> {
         // Open dedicated stream for THIS RPC
         let (tx, rx) = self
             .connection
@@ -115,8 +171,8 @@ impl RpcClient {
 
         // Send request
         let request = Request {
-            service: service.into(),
-            resource: resource.into(),
+            service,
+            resource,
             body: Body::Rpc(body),
         };
 
@@ -138,6 +194,76 @@ impl RpcClient {
             Ok(resp) => Ok(resp),
             Err(e) => Err(ClientError::Resource(e)),
         }
+    }
+
+    /// Internal retry wrapper using backon
+    async fn call_with_retry(
+        &self,
+        service: String,
+        resource: String,
+        body: Bytes,
+        config: &RetryConfig,
+    ) -> Result<Response, ClientError> {
+        let retry_policy = ExponentialBuilder::default()
+            .with_max_times(config.max_attempts as usize)
+            .with_min_delay(config.initial_backoff)
+            .with_max_delay(config.max_backoff)
+            .with_factor(config.backoff_multiplier);
+
+        let retry_policy = if config.jitter {
+            retry_policy.with_jitter()
+        } else {
+            retry_policy
+        };
+
+        let metrics = self.retry_metrics.clone();
+        let client = self.clone();
+
+        // Add attempt counter outside closure to track which attempt we're on
+        let attempt = Arc::new(AtomicU64::new(0));
+        let attempt_clone = Arc::clone(&attempt);
+
+        (|| async {
+            // Track current attempt
+            let current_attempt = attempt_clone.fetch_add(1, Ordering::Relaxed);
+
+            // Clone only when executing (inside closure, only on retry)
+            let result = client
+                .call_internal(service.clone(), resource.clone(), body.clone())
+                .await;
+
+            match result {
+                Ok(resp) => {
+                    // Only count if this was a RETRY (not first attempt)
+                    if current_attempt > 0 {
+                        if let Some(m) = &metrics {
+                            m.record_success_after_retry();
+                        }
+                    }
+                    Ok(resp)
+                }
+                Err(e) if config.is_retryable(&e) => {
+                    // Only now do we know this is a retry
+                    if let Some(m) = &metrics {
+                        m.increment_total_retries();
+                    }
+                    Err(e)
+                }
+                Err(e) => {
+                    // Non-retryable error OR exhausted retries
+                    // Only record if we actually exhausted retries
+                    if current_attempt >= config.max_attempts as u64 - 1 {
+                        if let Some(m) = &metrics {
+                            m.record_max_retries_exceeded();
+                        }
+                    }
+                    Err(e)
+                }
+            }
+        })
+        .retry(retry_policy)
+        .when(|e: &ClientError| config.is_retryable(e))
+        .await
     }
 
     /// Subscribe to a resource
@@ -582,5 +708,93 @@ impl NotificationSender {
     /// This allows direct access to all RecvStream methods for receiving acknowledgments.
     pub fn recv_stream(&self) -> &RecvStream {
         self.rx.get_ref()
+    }
+}
+
+/// Builder for constructing an [`RpcClient`] with optional retry support
+///
+/// # Example
+/// ```rust,no_run
+/// use zel_core::protocol::{RpcClient, RetryConfig};
+/// use std::time::Duration;
+///
+/// # async fn example(connection: iroh::endpoint::Connection) -> Result<(), Box<dyn std::error::Error>> {
+/// let retry_config = RetryConfig::builder()
+///     .max_attempts(3)
+///     .initial_backoff(Duration::from_millis(100))
+///     .with_jitter()
+///     .build()?;
+///
+/// let client = RpcClient::builder(connection)
+///     .with_retry_config(retry_config)
+///     .with_retry_metrics()
+///     .build()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct RpcClientBuilder {
+    connection: Connection,
+    retry_config: Option<RetryConfig>,
+    enable_metrics: bool,
+}
+
+impl RpcClientBuilder {
+    /// Create a new builder from an Iroh connection
+    pub fn new(connection: Connection) -> Self {
+        Self {
+            connection,
+            retry_config: None,
+            enable_metrics: false,
+        }
+    }
+
+    /// Enable retry support with the given configuration
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use zel_core::protocol::{RpcClient, RetryConfig};
+    /// use std::time::Duration;
+    ///
+    /// # async fn example(connection: iroh::endpoint::Connection) -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = RetryConfig::builder()
+    ///     .max_attempts(5)
+    ///     .initial_backoff(Duration::from_millis(50))
+    ///     .build()?;
+    ///
+    /// let client = RpcClient::builder(connection)
+    ///     .with_retry_config(config)
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_retry_config(mut self, config: RetryConfig) -> Self {
+        self.retry_config = Some(config);
+        self
+    }
+
+    /// Enable retry metrics collection
+    ///
+    /// When enabled, the client will track retry statistics that can be
+    /// accessed for monitoring and observability.
+    pub fn with_retry_metrics(mut self) -> Self {
+        self.enable_metrics = true;
+        self
+    }
+
+    /// Build the RPC client
+    pub async fn build(self) -> Result<RpcClient, ClientError> {
+        let retry_metrics = if self.enable_metrics {
+            Some(Arc::new(RetryMetrics::new()))
+        } else {
+            None
+        };
+
+        Ok(RpcClient {
+            connection: self.connection,
+            retry_config: self.retry_config,
+            retry_metrics,
+        })
     }
 }

@@ -31,16 +31,20 @@ pub fn generate_param_deserialization(params: &[ParamInfo]) -> TokenStream2 {
         let ty = &param_types[0];
         quote! {
             let #ident: #ty = serde_json::from_slice(data)
-                .map_err(|e| zel_core::protocol::ResourceError::CallbackError(
-                    format!("Failed to deserialize parameter: {}", e)
-                ))?;
+                .map_err(|e| zel_core::protocol::ResourceError::CallbackError {
+                    message: format!("Failed to deserialize parameter: {}", e),
+                    severity: zel_core::protocol::error_classification::ErrorSeverity::Application,
+                    context: None,
+                })?;
         }
     } else {
         quote! {
             let params: (#(#param_types),*) = serde_json::from_slice(data)
-                .map_err(|e| zel_core::protocol::ResourceError::CallbackError(
-                    format!("Failed to deserialize parameters: {}", e)
-                ))?;
+                .map_err(|e| zel_core::protocol::ResourceError::CallbackError {
+                    message: format!("Failed to deserialize parameters: {}", e),
+                    severity: zel_core::protocol::error_classification::ErrorSeverity::Application,
+                    context: None,
+                })?;
             let (#(#param_idents),*) = params;
         }
     }

@@ -10,7 +10,8 @@ use std::future::Future;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 use crate::protocol::{
-    Extensions, Request, RequestContext, ResourceError, ResourceResponse, Response, ServiceMap,
+    error_classification::ErrorSeverity as ErrorSeverityType, ErrorClassificationExt, Extensions,
+    Request, RequestContext, ResourceError, ResourceResponse, Response, ServiceMap,
     SubscriptionMsg,
 };
 
@@ -30,6 +31,7 @@ impl ProtocolHandler for super::RpcServer<'static> {
         let shutdown_signal = self.shutdown_signal.clone();
         let is_shutting_down = self.is_shutting_down.clone();
         let task_tracker = self.task_tracker.clone();
+        let circuit_breakers = self.circuit_breakers.clone();
 
         async move {
             tokio::spawn(async move {
@@ -43,6 +45,7 @@ impl ProtocolHandler for super::RpcServer<'static> {
                     shutdown_signal,
                     is_shutting_down,
                     task_tracker,
+                    circuit_breakers,
                 )
                 .await
                 {
@@ -65,6 +68,7 @@ async fn connection_handler(
     shutdown_signal: std::sync::Arc<tokio::sync::Notify>,
     is_shutting_down: std::sync::Arc<std::sync::atomic::AtomicBool>,
     task_tracker: super::shutdown::TaskTracker,
+    circuit_breakers: Option<std::sync::Arc<super::circuit_breaker::PeerCircuitBreakers>>,
 ) -> anyhow::Result<()> {
     use std::sync::atomic::Ordering;
     // Call connection hook to populate connection-scoped extensions
@@ -126,15 +130,15 @@ async fn connection_handler(
                         let endpoint_clone = endpoint.clone();
                         let conn = connection.clone();
                         let conn_id = connection.remote_id();
-
                         let shutdown_sig = shutdown_signal.clone();
+                        let cb = circuit_breakers.clone();
 
                         tokio::spawn(async move {
                             // Keep guard alive for the lifetime of this task
                             let _guard = task_guard;
 
                             if let Err(e) =
-                                handle_stream(tx, rx, service_map, server_ext, conn_ext, middleware, endpoint_clone, conn, shutdown_sig)
+                                handle_stream(tx, rx, service_map, server_ext, conn_ext, middleware, endpoint_clone, conn, shutdown_sig, cb)
                                     .await
                             {
                                 log::error!("Stream handler error for {}: {e}", conn_id);
@@ -167,6 +171,7 @@ async fn handle_stream(
     endpoint: iroh::Endpoint,
     connection: Connection,
     shutdown_signal: std::sync::Arc<tokio::sync::Notify>,
+    circuit_breakers: Option<std::sync::Arc<super::circuit_breaker::PeerCircuitBreakers>>,
 ) -> anyhow::Result<()> {
     let mut tx = FramedWrite::new(tx, LengthDelimitedCodec::new());
     let mut rx = FramedRead::new(rx, LengthDelimitedCodec::new());
@@ -245,10 +250,55 @@ async fn handle_stream(
                 ctx = middleware(ctx).await;
             }
 
-            let response: ResourceResponse = (callback)(ctx, request).await;
+            // Execute handler with circuit breaker protection
+            let response: ResourceResponse = if let Some(cb) = &circuit_breakers {
+                let peer_id = connection.remote_id();
+                let ctx_clone = ctx.clone();
+                let req_clone = request.clone();
+                let callback_clone = callback.clone();
+
+                match cb
+                    .call_async(&peer_id, || async move {
+                        (callback_clone)(ctx_clone, req_clone).await.map_err(|e| {
+                            // Preserve severity when converting ResourceError to anyhow::Error
+                            let severity = e.severity();
+                            let err = anyhow::anyhow!("{}", e);
+                            match severity {
+                                ErrorSeverityType::Application => err.as_application(),
+                                ErrorSeverityType::Infrastructure => err.as_infrastructure(),
+                                ErrorSeverityType::SystemFailure => err.as_system_failure(),
+                            }
+                        })
+                    })
+                    .await
+                {
+                    Ok(resp) => Ok(resp),
+                    Err(circuitbreaker_rs::BreakerError::Open) => {
+                        Err(ResourceError::CircuitBreakerOpen {
+                            peer_id: peer_id.to_string(),
+                        })
+                    }
+                    Err(circuitbreaker_rs::BreakerError::Operation(e)) => {
+                        // ServiceError has .severity() method - preserve it!
+                        Err(ResourceError::CallbackError {
+                            message: e.to_string(),
+                            severity: e.severity(),
+                            context: None,
+                        })
+                    }
+                    Err(e) => Err(ResourceError::CallbackError {
+                        message: e.to_string(),
+                        severity: ErrorSeverityType::Application,
+                        context: None,
+                    }),
+                }
+            } else {
+                (callback)(ctx, request).await
+            };
+
             let response = match response {
                 Ok(r) => Ok(r),
-                Err(e) => Err(ResourceError::CallbackError(e.to_string())),
+                Err(e) => Err(e),
             };
 
             let response_bytes = match serde_json::to_vec(&response) {
@@ -273,7 +323,11 @@ async fn handle_stream(
         super::ResourceCallback::SubscriptionProducer(callback) => {
             // Open uni stream for subscription
             let Ok(sub_tx) = connection.open_uni().await else {
-                let error = ResourceError::CallbackError("Failed to establish stream".into());
+                let error = ResourceError::CallbackError {
+                    message: "Failed to establish stream".into(),
+                    severity: ErrorSeverityType::Application,
+                    context: None,
+                };
                 let response: Result<Response, ResourceError> = Err(error);
                 if let Ok(response_bytes) = serde_json::to_vec(&response) {
                     let _ = tx.send(response_bytes.into()).await;
@@ -296,7 +350,11 @@ async fn handle_stream(
                     "attempted to send subscription ack to peer {} but failed {e}",
                     connection.remote_id()
                 );
-                let error = ResourceError::CallbackError(format!("Failed to send ack: {e}"));
+                let error = ResourceError::CallbackError {
+                    message: format!("Failed to send ack: {e}"),
+                    severity: ErrorSeverityType::Application,
+                    context: None,
+                };
                 let response: Result<Response, ResourceError> = Err(error);
                 if let Ok(response_bytes) = serde_json::to_vec(&response) {
                     let _ = tx.send(response_bytes.into()).await;
@@ -352,8 +410,11 @@ async fn handle_stream(
         super::ResourceCallback::NotificationConsumer(callback) => {
             // Open bidirectional stream for notification (client sends, server acks)
             let Ok((notif_tx, notif_rx)) = connection.open_bi().await else {
-                let error =
-                    ResourceError::CallbackError("Failed to establish notification stream".into());
+                let error = ResourceError::CallbackError {
+                    message: "Failed to establish notification stream".into(),
+                    severity: ErrorSeverityType::Application,
+                    context: None,
+                };
                 let response: Result<Response, ResourceError> = Err(error);
                 if let Ok(response_bytes) = serde_json::to_vec(&response) {
                     let _ = tx.send(response_bytes.into()).await;
@@ -377,7 +438,11 @@ async fn handle_stream(
                     "attempted to send notification ack to peer {} but failed {e}",
                     connection.remote_id()
                 );
-                let error = ResourceError::CallbackError(format!("Failed to send ack: {e}"));
+                let error = ResourceError::CallbackError {
+                    message: format!("Failed to send ack: {e}"),
+                    severity: ErrorSeverityType::Application,
+                    context: None,
+                };
                 let response: Result<Response, ResourceError> = Err(error);
                 if let Ok(response_bytes) = serde_json::to_vec(&response) {
                     let _ = tx.send(response_bytes.into()).await;
@@ -433,7 +498,11 @@ async fn handle_stream(
         super::ResourceCallback::StreamHandler(callback) => {
             // Open new bidirectional stream for raw stream handler
             let Ok((mut stream_tx, stream_rx)) = connection.open_bi().await else {
-                let error = ResourceError::CallbackError("Failed to open bidi stream".into());
+                let error = ResourceError::CallbackError {
+                    message: "Failed to open bidi stream".into(),
+                    severity: ErrorSeverityType::Application,
+                    context: None,
+                };
                 let response: Result<Response, ResourceError> = Err(error);
                 if let Ok(response_bytes) = serde_json::to_vec(&response) {
                     let _ = tx.send(response_bytes.into()).await;
@@ -448,7 +517,11 @@ async fn handle_stream(
                     "failed to send stream ACK to peer {}: {e}",
                     connection.remote_id()
                 );
-                let error = ResourceError::CallbackError(format!("Failed to send stream ACK: {e}"));
+                let error = ResourceError::CallbackError {
+                    message: format!("Failed to send stream ACK: {e}"),
+                    severity: ErrorSeverityType::Application,
+                    context: None,
+                };
                 let response: Result<Response, ResourceError> = Err(error);
                 if let Ok(response_bytes) = serde_json::to_vec(&response) {
                     let _ = tx.send(response_bytes.into()).await;

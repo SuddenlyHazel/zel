@@ -387,6 +387,7 @@ impl IrohBundle {
     /// ```rust,no_run
     /// # use zel_core::IrohBundle;
     /// # use iroh::Watcher;
+    /// # use futures::StreamExt;
     /// # async fn example() -> anyhow::Result<()> {
     /// let bundle = IrohBundle::builder(None).await?.finish().await;
     ///
