@@ -52,29 +52,20 @@
 //!         .connect(server_bundle.endpoint.id(), b"math/1")
 //!         .await?;
 //!
-//!     let client = RpcClient::new(conn).await?;
+//!     let client = RpcClient::new(conn.clone()).await?;
 //!     let math = MathClient::new(client);
 //!     let result = math.add(5, 3).await?; // Returns 8
 //!
 //!     // P2P Resilience: Wait for online, retries
 //!     client_bundle.wait_online().await; // Holepunch/relays ready
 //!     let retry_client = RpcClient::builder(conn)
-//!         .with_retry_config(RetryConfig::builder().max_attempts(3).build())
+//!         .with_retry_config(RetryConfig::builder().max_attempts(3).build()?)
 //!         .build()
 //!         .await?;
 //!
 //!     server_bundle.shutdown(Duration::from_secs(5)).await?;
 //!     Ok(())
 //! }
-//!
-//! // Server-side resilience
-//! let server = RpcServerBuilder::new(b"math/1", endpoint)
-//!     .with_circuit_breaker(CircuitBreakerConfig::builder()
-//!         .failure_threshold(0.5)
-//!         .build())
-//!     .service("math")
-//!     .build()
-//!     .build();
 //! ```
 //!
 //! # Core Components

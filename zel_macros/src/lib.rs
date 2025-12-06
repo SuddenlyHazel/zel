@@ -55,7 +55,7 @@ mod service;
 /// ```
 /// # Generated Code Preview
 ///
-/// ```rust
+/// ```rust,ignore
 /// // Generated MathServer trait (implement this)
 /// #[async_trait]
 /// pub trait MathServer {
