@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Shared error types for the Zel RPC framework"
+keywords = ["rpc", "p2p", "iroh", "networking"]
+categories = ["network-programming", "asynchronous"]
+readme = "../README.md"
 
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }

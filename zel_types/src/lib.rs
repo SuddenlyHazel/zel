@@ -1,3 +1,40 @@
+//! Shared error types for the Zel RPC framework.
+//!
+//! This crate provides core error types and severity classifications used across
+//! the Zel ecosystem. It exists as a separate crate to allow both `zel_core` and
+//! `zel_macros` to depend on the same error types without circular dependencies.
+//!
+//! # Main Types
+//!
+//! - [`ResourceError`] - Error type returned by RPC resource handlers
+//! - [`ErrorSeverity`] - Classification for circuit breaker decisions
+//!
+//! # Error Severity
+//!
+//! Errors are classified into three categories:
+//!
+//! - **Application** - Business logic errors (validation, "not found", etc.) - don't trip circuit breakers
+//! - **Infrastructure** - Network/protocol failures (connection drops, panics) - trip circuit breakers
+//! - **SystemFailure** - Backend failures (database timeout, service down) - trip circuit breakers
+//!
+//! # Example
+//!
+//! ```rust
+//! use zel_types::{ResourceError, ErrorSeverity};
+//!
+//! // Application error - won't trip circuit breaker
+//! let app_err = ResourceError::app("User not found");
+//! assert_eq!(app_err.severity(), ErrorSeverity::Application);
+//!
+//! // Infrastructure error - will trip circuit breaker
+//! let infra_err = ResourceError::infra("Connection timeout");
+//! assert_eq!(infra_err.severity(), ErrorSeverity::Infrastructure);
+//!
+//! // System failure - will trip circuit breaker
+//! let sys_err = ResourceError::system("Database unavailable");
+//! assert_eq!(sys_err.severity(), ErrorSeverity::SystemFailure);
+//! ```
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
