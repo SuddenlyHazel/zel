@@ -31,10 +31,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+use zel_core::protocol::ResourceResultExt;
 use zel_core::protocol::{
-    error_classification::ErrorSeverity as ErrorSeverityType, CircuitBreakerConfig,
-    CircuitBreakerStats, ClientError, ErrorClassificationExt, ResourceError, Response, RetryConfig,
-    RpcClient, RpcServerBuilder,
+    CircuitBreakerConfig, CircuitBreakerStats, ClientError, ErrorClassificationExt, ResourceError,
+    Response, RetryConfig, RpcClient, RpcServerBuilder,
 };
 use zel_core::IrohBundle;
 
@@ -99,14 +99,7 @@ async fn main() -> Result<()> {
                             *stats_holder.lock().await = Some(stats.clone());
                         }
                     }
-                    service
-                        .app_error()
-                        .await
-                        .map_err(|e| ResourceError::CallbackError {
-                            message: e.to_string(),
-                            severity: ErrorSeverityType::Application,
-                            context: None,
-                        })
+                    service.app_error().await.to_app_error()
                 })
             }
         })
@@ -115,16 +108,7 @@ async fn main() -> Result<()> {
             let service = Arc::new(service.clone());
             move |_ctx, _req| {
                 let service = Arc::clone(&service);
-                Box::pin(async move {
-                    service
-                        .infra_error()
-                        .await
-                        .map_err(|e| ResourceError::CallbackError {
-                            message: e.to_string(),
-                            severity: ErrorSeverityType::Infrastructure,
-                            context: None,
-                        })
-                })
+                Box::pin(async move { service.infra_error().await.to_infra_error() })
             }
         })
         // System failure - WILL trip circuit breaker
@@ -132,16 +116,7 @@ async fn main() -> Result<()> {
             let service = Arc::new(service.clone());
             move |_ctx, _req| {
                 let service = Arc::clone(&service);
-                Box::pin(async move {
-                    service
-                        .system_error()
-                        .await
-                        .map_err(|e| ResourceError::CallbackError {
-                            message: e.to_string(),
-                            severity: ErrorSeverityType::Infrastructure,
-                            context: None,
-                        })
-                })
+                Box::pin(async move { service.system_error().await.to_system_error() })
             }
         })
         // Success method for recovery testing
@@ -149,16 +124,7 @@ async fn main() -> Result<()> {
             let service = Arc::new(service.clone());
             move |_ctx, _req| {
                 let service = Arc::clone(&service);
-                Box::pin(async move {
-                    service
-                        .success()
-                        .await
-                        .map_err(|e| ResourceError::CallbackError {
-                            message: e.to_string(),
-                            severity: ErrorSeverityType::Application,
-                            context: None,
-                        })
-                })
+                Box::pin(async move { service.success().await.to_app_error() })
             }
         })
         // Flaky method for retry testing
@@ -166,16 +132,7 @@ async fn main() -> Result<()> {
             let service = Arc::new(service.clone());
             move |_ctx, _req| {
                 let service = Arc::clone(&service);
-                Box::pin(async move {
-                    service
-                        .flaky_method()
-                        .await
-                        .map_err(|e| ResourceError::CallbackError {
-                            message: e.to_string(),
-                            severity: ErrorSeverityType::Application, // Application = retries but doesn't trip circuit
-                            context: None,
-                        })
-                })
+                Box::pin(async move { service.flaky_method().await.to_app_error() })
             }
         })
         .build()

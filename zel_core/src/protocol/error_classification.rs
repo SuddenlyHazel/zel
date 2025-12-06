@@ -131,28 +131,13 @@
 //! infrastructure problems, not business logic failures.
 
 use anyhow::Error;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Classification of error severity for circuit breaker decisions
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub enum ErrorSeverity {
-    /// Infrastructure errors - ALWAYS trip circuit breaker
-    ///
-    /// Examples: panics, connection drops, protocol failures
-    Infrastructure,
-
-    /// System failures - trip circuit breaker
-    ///
-    /// Examples: database timeout, upstream service down
-    /// Explicitly marked by developers using [`ErrorClassificationExt::as_system_failure()`]
-    SystemFailure,
-
-    /// Application/business logic errors - DON'T trip circuit breaker
-    ///
-    /// Examples: validation errors, "user not found", permission denied
-    Application,
-}
+///
+/// This type is shared with `zel_types` so that both `zel_core` and
+/// `zel_macros` use a single, canonical definition.
+pub use zel_types::ErrorSeverity;
 
 /// Strategy for classifying errors to determine circuit breaker behavior
 #[derive(Clone)]

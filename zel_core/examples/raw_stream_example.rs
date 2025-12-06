@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use zel_core::protocol::{zel_service, RequestContext, RpcServerBuilder};
 use zel_core::IrohBundle;
+use zel_types::ResourceError;
 
 // ============================================================================
 // Service Definition (using macros)
@@ -23,12 +24,12 @@ struct FileMetadata {
 trait FileService {
     /// Regular RPC method for getting metadata
     #[method(name = "metadata")]
-    async fn get_metadata(&self, filename: String) -> Result<FileMetadata, String>;
+    async fn get_metadata(&self, filename: String) -> Result<FileMetadata, ResourceError>;
 
     /// Stream method for raw file transfer with custom protocol
     /// Note: send/recv parameters are auto-injected by the macro
     #[stream(name = "transfer")]
-    async fn transfer_file(&self, filename: String) -> Result<(), String>;
+    async fn transfer_file(&self, filename: String) -> Result<(), ResourceError>;
 }
 
 // ============================================================================
@@ -44,7 +45,7 @@ impl FileServiceServer for FileServiceImpl {
         &self,
         _ctx: RequestContext,
         filename: String,
-    ) -> Result<FileMetadata, String> {
+    ) -> Result<FileMetadata, ResourceError> {
         println!("[Server] Getting metadata for: {}", filename);
         Ok(FileMetadata {
             filename,
@@ -58,7 +59,7 @@ impl FileServiceServer for FileServiceImpl {
         mut send: iroh::endpoint::SendStream,
         mut recv: iroh::endpoint::RecvStream,
         filename: String,
-    ) -> Result<(), String> {
+    ) -> Result<(), ResourceError> {
         println!("[Server] Stream handler started for file: {}", filename);
 
         // Custom protocol: receive chunks with 4-byte size prefix
@@ -83,7 +84,7 @@ impl FileServiceServer for FileServiceImpl {
             let mut chunk = vec![0u8; size as usize];
             recv.read_exact(&mut chunk)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| ResourceError::infra(e.to_string()))?;
             total_bytes += size as u64;
 
             println!(
@@ -92,13 +93,16 @@ impl FileServiceServer for FileServiceImpl {
             );
 
             // Send ACK
-            send.write_all(b"ACK").await.map_err(|e| e.to_string())?;
+            send.write_all(b"ACK")
+                .await
+                .map_err(|e| ResourceError::infra(e.to_string()))?;
         }
 
         println!("[Server] Transfer complete: {} total bytes", total_bytes);
 
         // Close the send stream to signal completion
-        send.finish().map_err(|e| e.to_string())?;
+        send.finish()
+            .map_err(|e| ResourceError::infra(e.to_string()))?;
 
         Ok(())
     }

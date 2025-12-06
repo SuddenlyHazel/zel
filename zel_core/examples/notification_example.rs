@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use zel_core::protocol::{zel_service, RequestContext, RpcServerBuilder};
 use zel_core::IrohBundle;
+use zel_types::ResourceError;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum UserEvent {
@@ -21,11 +22,11 @@ pub enum UserEvent {
 trait Analytics {
     /// Get current statistics
     #[method(name = "get_stats")]
-    async fn get_stats(&self) -> Result<Stats, String>;
+    async fn get_stats(&self) -> Result<Stats, ResourceError>;
 
     /// Client pushes user events to server (client-to-server streaming)
     #[notification(name = "user_events", item = "UserEvent")]
-    async fn user_events(&self) -> Result<(), String>;
+    async fn user_events(&self) -> Result<(), ResourceError>;
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -57,7 +58,7 @@ impl AnalyticsImpl {
 
 #[async_trait]
 impl AnalyticsServer for AnalyticsImpl {
-    async fn get_stats(&self, ctx: RequestContext) -> Result<Stats, String> {
+    async fn get_stats(&self, ctx: RequestContext) -> Result<Stats, ResourceError> {
         log::info!("get_stats called from peer: {}", ctx.remote_id());
         let stats = self.stats.lock().await;
         Ok(stats.clone())
@@ -67,14 +68,14 @@ impl AnalyticsServer for AnalyticsImpl {
         &self,
         ctx: RequestContext,
         mut receiver: AnalyticsUserEventsReceiver,
-    ) -> Result<(), String> {
+    ) -> Result<(), ResourceError> {
         log::info!("📥 Receiving events from peer: {}", ctx.remote_id());
 
         let mut event_count = 0;
 
         // Process events as they arrive
         while let Some(result) = receiver.next().await {
-            let event = result.map_err(|e| e.to_string())?;
+            let event = result.map_err(|e| ResourceError::app(e.to_string()))?;
             event_count += 1;
 
             log::info!("  ├─ Event #{}: {:?}", event_count, event);

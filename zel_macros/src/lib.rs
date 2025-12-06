@@ -20,24 +20,25 @@ mod service;
 /// use zel_macros::zel_service;
 /// use async_trait::async_trait;
 /// use zel_core::protocol::RequestContext;
+/// use zel_types::ResourceError;
 ///
 /// #[zel_service(name = "math")]
 /// trait Math {
 ///     /// Simple request/response
 ///     #[method(name = "add")]
-///     async fn add(&self, a: i32, b: i32) -> Result<i32, String>;
+///     async fn add(&self, a: i32, b: i32) -> Result<i32, ResourceError>;
 ///
 ///     /// Server-to-client streaming
 ///     #[subscription(name = "counter", item = "u64")]
-///     async fn counter(&self, interval_ms: u64) -> Result<(), String>;
+///     async fn counter(&self, interval_ms: u64) -> Result<(), ResourceError>;
 ///
 ///     /// Client-to-server streaming
 ///     #[notification(name = "log", item = "String")]
-///     async fn log_messages(&self) -> Result<(), String>;
+///     async fn log_messages(&self) -> Result<(), ResourceError>;
 ///
 ///     /// Bidirectional raw stream
 ///     #[stream(name = "transfer")]
-///     async fn file_transfer(&self, filename: String) -> Result<(), String>;
+///     async fn file_transfer(&self, filename: String) -> Result<(), ResourceError>;
 /// }
 ///
 /// // Implement the generated MathServer trait
@@ -46,7 +47,7 @@ mod service;
 ///
 /// #[async_trait]
 /// impl MathServer for MathImpl {
-///     async fn add(&self, ctx: RequestContext, a: i32, b: i32) -> Result<i32, String> {
+///     async fn add(&self, ctx: RequestContext, a: i32, b: i32) -> Result<i32, ResourceError> {
 ///         Ok(a + b)
 ///     }
 ///     // ... other methods

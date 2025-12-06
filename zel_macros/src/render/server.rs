@@ -219,27 +219,18 @@ pub fn render_method_registration(method: &MethodDescription) -> TokenStream2 {
                     Box::pin(async move {
                         // Extract body
                         let zel_core::protocol::Body::Rpc(data) = &req.body else {
-                            return Err(zel_core::protocol::ResourceError::CallbackError {
-                                message: "Expected RPC body".into(),
-                                severity: zel_core::protocol::error_classification::ErrorSeverity::Application,
-                                context: None,
-                            });
+                            return Err(zel_types::ResourceError::app("Expected RPC body"));
                         };
 
                         // Deserialize params
                         #deserialize_params
 
                         // Call user's method with context
-                        let result = service.#rust_method(ctx, #(#param_idents),*).await
-                            .map_err(|e| zel_core::protocol::ResourceError::CallbackError {
-                                message: e.to_string(),
-                                severity: zel_core::protocol::error_classification::ErrorSeverity::Application,
-                                context: None,
-                            })?;
+                        let result = service.#rust_method(ctx, #(#param_idents),*).await?;
 
                         // Serialize result
                         let data = serde_json::to_vec(&result)
-                            .map_err(|e| zel_core::protocol::ResourceError::SerializationError(
+                            .map_err(|e| zel_types::ResourceError::SerializationError(
                                 e.to_string()
                             ))?;
 
@@ -298,12 +289,7 @@ pub fn render_subscription_registration(
                         let sink = #typed_sink_name { inner: raw_sink };
 
                         // Call user's subscription method with context and typed sink
-                        service.#rust_method(ctx, sink, #(#param_idents),*).await
-                            .map_err(|e| zel_core::protocol::ResourceError::CallbackError {
-                                message: e.to_string(),
-                                severity: zel_core::protocol::error_classification::ErrorSeverity::Application,
-                                context: None,
-                            })?;
+                        service.#rust_method(ctx, sink, #(#param_idents),*).await?;
 
                         Ok(zel_core::protocol::Response {
                             data: bytes::Bytes::new()
@@ -363,12 +349,7 @@ pub fn render_notification_registration(
                         let receiver = #typed_receiver_name { inner: inner_rx, sink };
 
                         // Call user's notification method with context and typed receiver
-                        service.#rust_method(ctx, receiver, #(#param_idents),*).await
-                            .map_err(|e| zel_core::protocol::ResourceError::CallbackError {
-                                message: e.to_string(),
-                                severity: zel_core::protocol::error_classification::ErrorSeverity::Application,
-                                context: None,
-                            })?;
+                        service.#rust_method(ctx, receiver, #(#param_idents),*).await?;
 
                         Ok(zel_core::protocol::Response {
                             data: bytes::Bytes::new()
@@ -411,12 +392,7 @@ pub fn render_stream_registration(stream: &StreamDescription) -> TokenStream2 {
                         #deserialize_params
 
                         // Call user's stream method with context, raw streams, and params
-                        service.#rust_method(ctx, send, recv, #(#param_idents),*).await
-                            .map_err(|e| zel_core::protocol::ResourceError::CallbackError {
-                                message: e.to_string(),
-                                severity: zel_core::protocol::error_classification::ErrorSeverity::Application,
-                                context: None,
-                            })?;
+                        service.#rust_method(ctx, send, recv, #(#param_idents),*).await?;
 
                         Ok(zel_core::protocol::Response {
                             data: bytes::Bytes::new()

@@ -12,6 +12,7 @@ use std::time::Duration;
 use zel_core::protocol::RequestContext;
 use zel_core::protocol::{zel_service, RpcServerBuilder};
 use zel_core::IrohBundle;
+use zel_types::ResourceError;
 
 // ============================================================================
 // Service 1: Calculator
@@ -25,13 +26,13 @@ pub struct CounterMsg {
 #[zel_service(name = "calculator")]
 trait Calculator {
     #[method(name = "add")]
-    async fn add(&self, a: i32, b: i32) -> Result<i32, String>;
+    async fn add(&self, a: i32, b: i32) -> Result<i32, ResourceError>;
 
     #[method(name = "multiply")]
-    async fn multiply(&self, a: i32, b: i32) -> Result<i32, String>;
+    async fn multiply(&self, a: i32, b: i32) -> Result<i32, ResourceError>;
 
     #[subscription(name = "counter", item = "CounterMsg")]
-    async fn counter(&self, interval_ms: u64) -> Result<(), String>;
+    async fn counter(&self, interval_ms: u64) -> Result<(), ResourceError>;
 }
 
 #[derive(Clone)]
@@ -39,11 +40,11 @@ struct CalculatorImpl;
 
 #[async_trait]
 impl CalculatorServer for CalculatorImpl {
-    async fn add(&self, _ctx: RequestContext, a: i32, b: i32) -> Result<i32, String> {
+    async fn add(&self, _ctx: RequestContext, a: i32, b: i32) -> Result<i32, ResourceError> {
         Ok(a + b)
     }
 
-    async fn multiply(&self, _ctx: RequestContext, a: i32, b: i32) -> Result<i32, String> {
+    async fn multiply(&self, _ctx: RequestContext, a: i32, b: i32) -> Result<i32, ResourceError> {
         Ok(a * b)
     }
 
@@ -52,7 +53,7 @@ impl CalculatorServer for CalculatorImpl {
         _ctx: RequestContext,
         mut sink: CalculatorCounterSink,
         interval_ms: u64,
-    ) -> Result<(), String> {
+    ) -> Result<(), ResourceError> {
         let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
 
         for count in 1..=3 {
@@ -80,13 +81,13 @@ pub struct Greeting {
 #[zel_service(name = "hello")]
 trait Hello {
     #[method(name = "greet")]
-    async fn greet(&self, name: String) -> Result<Greeting, String>;
+    async fn greet(&self, name: String) -> Result<Greeting, ResourceError>;
 
     #[method(name = "farewell")]
-    async fn farewell(&self, name: String) -> Result<String, String>;
+    async fn farewell(&self, name: String) -> Result<String, ResourceError>;
 
     #[subscription(name = "notifications", item = "String")]
-    async fn notifications(&self, topic: String) -> Result<(), String>;
+    async fn notifications(&self, topic: String) -> Result<(), ResourceError>;
 }
 
 #[derive(Clone)]
@@ -94,7 +95,7 @@ struct HelloImpl;
 
 #[async_trait]
 impl HelloServer for HelloImpl {
-    async fn greet(&self, _ctx: RequestContext, name: String) -> Result<Greeting, String> {
+    async fn greet(&self, _ctx: RequestContext, name: String) -> Result<Greeting, ResourceError> {
         use std::time::SystemTime;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -106,7 +107,7 @@ impl HelloServer for HelloImpl {
         })
     }
 
-    async fn farewell(&self, _ctx: RequestContext, name: String) -> Result<String, String> {
+    async fn farewell(&self, _ctx: RequestContext, name: String) -> Result<String, ResourceError> {
         Ok(format!("Goodbye, {}! Thanks for using Zel!", name))
     }
 
@@ -115,7 +116,7 @@ impl HelloServer for HelloImpl {
         _ctx: RequestContext,
         mut sink: HelloNotificationsSink,
         topic: String,
-    ) -> Result<(), String> {
+    ) -> Result<(), ResourceError> {
         let messages = vec![
             format!("[{}] Service started", topic),
             format!("[{}] New update available", topic),

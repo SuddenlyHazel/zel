@@ -4,10 +4,11 @@
 //! failures and misbehaving clients. Each peer gets its own isolated circuit breaker,
 //! ensuring failures from one peer don't affect others.
 //!
-//! **Note on State Observation:** While the underlying `circuitbreaker-rs` library implements
-//! the full Closed → Open → HalfOpen → Closed state machine internally, our wrapper can only
-//! observe Closed and Open states through the library's API. The state diagrams below describe
-//! the complete behavior of the underlying circuit breaker.
+//! **Note on State Observation:** The underlying `circuitbreaker-rs` library implements
+//! the full Closed → Open → Half-Open → Closed state machine and exposes it via
+//! `CircuitBreaker::current_state()`. This wrapper surfaces those states through
+//! [`PeerCircuitBreakers::get_stats()`](zel_core/src/protocol/circuit_breaker.rs:340),
+//! which reports whether each peer's circuit is **Closed**, **Open**, or **HalfOpen**.
 //!
 //! # Circuit Breaker States
 //!
@@ -59,7 +60,7 @@
 //!          │     threshold│              │
 //!          │              v              │
 //!     any  │         ┌─────────┐         │
-//!     failure       │  Open   │         │
+//!     failure        │  Open   │         │
 //!          │         └─────────┘         │
 //!          │              │              │
 //!          │    timeout   │              │
@@ -77,7 +78,8 @@
 //! Number of consecutive failures before opening the circuit.
 //!
 //! - **Too low (1-2)**: Circuit may trip on transient errors, causing false positives
-//! - **Recommended (3-5)**: Balances sensitivity with stability
+//! - **Recommended (3-5)**: Balances sensitivity with stability; use these as starting
+//!   points and adjust based on observed metrics for your workload
 //! - **Too high (>10)**: May allow too many failures before protection kicks in
 //!
 //! ```rust
@@ -93,7 +95,8 @@
 //! Number of consecutive successes needed in half-open state to close the circuit.
 //!
 //! - **Too low (1)**: May close prematurely on lucky single success
-//! - **Recommended (2-3)**: Provides confidence without excessive testing
+//! - **Recommended (2-3)**: Provides confidence without excessive testing; treat these
+//!   as initial values and refine them with production metrics
 //! - **Too high (>5)**: Delays recovery unnecessarily
 //!
 //! ```rust
@@ -109,7 +112,8 @@
 //! How long the circuit stays open before attempting recovery.
 //!
 //! - **Too short (<10s)**: May cause circuit flapping
-//! - **Recommended (30-60s)**: Allows time for system recovery
+//! - **Recommended (30-60s)**: Allows time for system recovery; start here and
+//!   adjust up or down based on how quickly your dependencies typically recover
 //! - **Too long (>5min)**: Delays service restoration unnecessarily
 //!
 //! ```rust
@@ -125,7 +129,10 @@
 //!
 //! ## DO: Use Default Configuration Initially
 //!
-//! The defaults are based on industry standards and work well for most scenarios:
+//! The defaults follow common circuit-breaker patterns and align with the
+//! example configuration used in `circuitbreaker-rs`'s documentation.
+//! They are solid starting points, but you should tune them based on metrics for
+//! your specific workload:
 //!
 //! ```rust
 //! use zel_core::protocol::CircuitBreakerConfig;
@@ -209,7 +216,7 @@
 //! - **Background tasks**: Higher thresholds (more tolerant)
 //! - **External APIs**: Longer timeouts (may be temporarily unavailable)
 
-use circuitbreaker_rs::{BreakerError, CircuitBreaker, DefaultPolicy};
+use circuitbreaker_rs::{BreakerError, CircuitBreaker, DefaultPolicy, State as BreakerState};
 use iroh::PublicKey;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -238,19 +245,19 @@ use serde::{Deserialize, Serialize};
 /// ```
 pub struct PeerCircuitBreakers {
     breakers: Arc<RwLock<HashMap<PublicKey, CircuitBreaker<DefaultPolicy, ServiceError>>>>,
-    /// Track observed circuit states based on operation results
-    /// Since circuitbreaker-rs doesn't expose state, we infer it from results
-    states: Arc<RwLock<HashMap<PublicKey, CircuitState>>>,
     config: CircuitBreakerConfig,
+    /// Error classification strategy used to decide which failures trip the circuit
+    classifier: ErrorClassifier,
 }
 
 impl PeerCircuitBreakers {
     /// Create a new per-peer circuit breaker manager
     pub fn new(config: CircuitBreakerConfig) -> Self {
+        let classifier = config.error_classifier.clone();
         Self {
             breakers: Arc::new(RwLock::new(HashMap::new())),
-            states: Arc::new(RwLock::new(HashMap::new())),
             config,
+            classifier,
         }
     }
 
@@ -279,18 +286,23 @@ impl PeerCircuitBreakers {
                 .clone()
         };
 
+        let classifier = self.classifier.clone();
+
         // Double-Result wrapper pattern:
         // - Ok(Ok(T)) = success
         // - Ok(Err(ServiceError)) = application error (bypasses circuit tracking)
         // - Err(ServiceError) = severe error (trips circuit)
+        let classifier = self.classifier.clone();
         let result = breaker
             .call_async(|| async {
                 match operation().await {
                     Ok(value) => Ok(Ok(value)),
                     Err(e) => {
-                        let service_error = ServiceError::from(e); // Auto-classifies!
+                        let severity = classifier.classify(&e);
+                        let message = e.to_string();
+                        let service_error = ServiceError::from_severity_and_msg(severity, message);
 
-                        match service_error.severity() {
+                        match severity {
                             ErrorSeverityType::Application => {
                                 // Application error - bypass circuit breaker tracking
                                 Ok(Err(service_error))
@@ -313,39 +325,29 @@ impl PeerCircuitBreakers {
             Err(severe_error) => Err(severe_error),
         };
 
-        // Track state based on result
-        let mut states = self.states.write().await;
-        match &result {
-            Ok(_) => {
-                // Success - circuit is either Closed or transitioning from HalfOpen to Closed
-                // We'll assume Closed for simplicity (could be HalfOpen but we can't tell)
-                states.insert(*peer_id, CircuitState::Closed);
-            }
-            Err(BreakerError::Open) => {
-                // Circuit rejected the request - it's Open
-                states.insert(*peer_id, CircuitState::Open);
-            }
-            Err(BreakerError::Operation(_)) | Err(BreakerError::Internal(_)) => {
-                // Operation failed but circuit is still allowing requests
-                // We don't update state here - state will be updated when:
-                // - Next request gets BreakerError::Open (circuit opened)
-                // - Next request succeeds (circuit still closed/half-open)
-                // This provides eventual consistency without interfering with the circuit's operation
-            }
-        }
-
         result
     }
 
     /// Get current circuit states for all peers (for observability)
     ///
-    /// Returns states inferred from operation results. Since circuitbreaker-rs
-    /// doesn't expose internal state, we track it by observing:
-    /// - BreakerError::Open -> circuit is Open
-    /// - Successful operations -> circuit is Closed
-    /// - Operation errors -> state unchanged (could be HalfOpen testing)
+    /// Returns the current state of each peer's circuit breaker by querying
+    /// the underlying `circuitbreaker-rs` breakers via `current_state()`:
+    /// - [`CircuitState::Closed`] when the breaker is allowing calls normally
+    /// - [`CircuitState::Open`] when the breaker is rejecting calls
+    /// - [`CircuitState::HalfOpen`] when the breaker is probing for recovery
     pub async fn get_stats(&self) -> HashMap<PublicKey, CircuitState> {
-        self.states.read().await.clone()
+        let breakers = self.breakers.read().await;
+        breakers
+            .iter()
+            .map(|(peer_id, breaker)| {
+                let state = match breaker.current_state() {
+                    circuitbreaker_rs::State::Closed => CircuitState::Closed,
+                    circuitbreaker_rs::State::Open => CircuitState::Open,
+                    circuitbreaker_rs::State::HalfOpen => CircuitState::HalfOpen,
+                };
+                (*peer_id, state)
+            })
+            .collect()
     }
 
     fn create_circuit_breaker(&self) -> CircuitBreaker<DefaultPolicy, ServiceError> {
@@ -385,6 +387,7 @@ pub enum ServiceError {
     SystemFailure(String),
 }
 
+/// ServiceError helpers
 impl ServiceError {
     pub fn severity(&self) -> ErrorSeverityType {
         match self {
@@ -393,9 +396,28 @@ impl ServiceError {
             ServiceError::SystemFailure(_) => ErrorSeverityType::SystemFailure,
         }
     }
+
+    /// Construct a ServiceError from a severity classification and message
+    pub fn from_severity_and_msg(severity: ErrorSeverityType, message: String) -> Self {
+        match severity {
+            ErrorSeverityType::Application => ServiceError::Application(message),
+            ErrorSeverityType::Infrastructure => ServiceError::Infrastructure(message),
+            ErrorSeverityType::SystemFailure => ServiceError::SystemFailure(message),
+        }
+    }
 }
 
-// Automatic conversion from anyhow::Error using error classification
+/// Convenience conversion from `anyhow::Error` using the *default* [`ErrorClassifier`].
+///
+/// This helper always classifies with `ErrorClassifier::Default`, independent of any
+/// [`CircuitBreakerConfig::error_classifier`](zel_core/src/protocol/circuit_breaker.rs:468)
+/// or [`PeerCircuitBreakers`](zel_core/src/protocol/circuit_breaker.rs:240) instance.
+///
+/// Circuit breaker behavior (which errors contribute to tripping) is controlled by
+/// `PeerCircuitBreakers::call_async`, which uses its configured classifier and
+/// constructs a [`ServiceError`] via
+/// [`ServiceError::from_severity_and_msg`](zel_core/src/protocol/circuit_breaker.rs:392).
+/// Use this impl only when the default classification policy is sufficient.
 impl From<anyhow::Error> for ServiceError {
     fn from(err: anyhow::Error) -> Self {
         let classifier = ErrorClassifier::default();

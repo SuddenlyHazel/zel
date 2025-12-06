@@ -9,6 +9,7 @@
 //! ```rust,no_run
 //! use zel_core::protocol::{zel_service, RequestContext, RpcServerBuilder, RpcClient};
 //! use zel_core::IrohBundle;
+//! use zel_types::ResourceError;
 //! use async_trait::async_trait;
 //! use std::time::Duration;
 //!
@@ -16,7 +17,7 @@
 //! #[zel_service(name = "math")]
 //! trait Math {
 //!     #[method(name = "add")]
-//!     async fn add(&self, a: i32, b: i32) -> Result<i32, String>;
+//!     async fn add(&self, a: i32, b: i32) -> Result<i32, ResourceError>;
 //! }
 //!
 //! // Implement the service
@@ -25,7 +26,7 @@
 //!
 //! #[async_trait]
 //! impl MathServer for MathImpl {
-//!     async fn add(&self, ctx: RequestContext, a: i32, b: i32) -> Result<i32, String> {
+//!     async fn add(&self, ctx: RequestContext, a: i32, b: i32) -> Result<i32, ResourceError> {
 //!         Ok(a + b)
 //!     }
 //! }
