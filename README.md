@@ -1,7 +1,40 @@
-
 # Zel RPC Framework
 
 A type-safe RPC framework built on [Iroh](https://iroh.computer/)! Out of the box support for methods, subscriptions (server to client stream), notifications (client to server stream), and raw bidirectional streams.
+
+## Quick Start
+
+```toml
+# Cargo.toml
+[dependencies]
+zel_core = "0.3.2"
+# Note: No need to add zel_types or zel_macros - everything is re-exported!
+```
+
+```rust
+// Import everything with the prelude
+use zel_core::prelude::*;
+
+// Define your service
+#[zel_service(name = "math")]
+trait Math {
+    #[method(name = "add")]
+    async fn add(&self, a: i32, b: i32) -> Result<i32, ResourceError>;
+}
+
+// Implement it
+#[derive(Clone)]
+struct MathService;
+
+#[async_trait]
+impl MathServer for MathService {
+    async fn add(&self, ctx: RequestContext, a: i32, b: i32)
+        -> Result<i32, ResourceError>
+    {
+        Ok(a + b)
+    }
+}
+```
 
 ## Table of Contents
 
@@ -33,6 +66,7 @@ Zel RPC provides four types of endpoints:
 4. **Raw Streams** (`#[stream]`) - Bidirectional custom protocols (BYOP)
 
 All endpoints receive a `RequestContext` providing access to:
+
 - The underlying Iroh connection
 - Three-tier extension system (server/connection/request)
 - Remote peer information
@@ -49,11 +83,11 @@ sequenceDiagram
     participant S as Server<br/>(ALPN: myapp/1)
     participant SVC as Service: users
     participant RES as Resource: create
-    
+
     Note over C,S: Connection Setup
     C->>S: connect(peer_id, "myapp/1")
     S->>S: accept connection
-    
+
     Note over C,RES: Request Flow
     C->>S: open_bi() stream
     S->>S: accept_bi() → spawn handler
@@ -63,7 +97,7 @@ sequenceDiagram
     RES->>RES: Handle with RequestContext
     RES->>S: Response
     S->>C: Response
-    
+
     Note over C,S: Each request gets own stream
 ```
 
@@ -74,12 +108,15 @@ sequenceDiagram
 Zel uses a three-tier extension system to share context across different scopes:
 
 #### Server Extensions (Shared)
+
 - Database connection pools, configuration, shared caches, metrics collectors
 
 #### Connection Extensions (Isolated)
+
 - User sessions, authentication state, per-peer metrics
 
 #### Request Extensions (Unique)
+
 - Distributed trace IDs, request timing, per-call context
 
 **📚 For complete documentation, see [`doc_more/EXTENSIONS.MD`](doc_more/EXTENSIONS.MD)**
@@ -91,15 +128,19 @@ Zel uses a three-tier extension system to share context across different scopes:
 ## Service Definition
 
 ### Methods
+
 Request/response RPC - handler receives `RequestContext` as first parameter
 
 ### Subscriptions
+
 Server-to-client streaming - handler receives `RequestContext` and typed `sink`
 
 ### Notifications
+
 Client-to-server streaming - handler receives `RequestContext`, receive stream, and ack sender
 
 ### Raw Streams
+
 Custom bidirectional protocols - handler receives `RequestContext`, `SendStream`, `RecvStream`
 
 **See [`examples/macro_service_example.rs`](zel_core/examples/macro_service_example.rs) and [`examples/notification_example.rs`](zel_core/examples/notification_example.rs) for complete service definitions**
@@ -116,6 +157,7 @@ Zel provides a few resilience tools out of the box:
 - **Monitoring**: `RequestContext::remote_id()`, `connection_rtt()`, `connection_stats()`.
 
 **Example**:
+
 ```rust
 let server = RpcServerBuilder::new(b"app/1", endpoint)
     .with_circuit_breaker(CircuitBreakerConfig::builder()
@@ -130,11 +172,13 @@ See [`doc_more/P2P-RESILIENCE.md`](doc_more/P2P-RESILIENCE.md) for complete deta
 ## Advanced Iroh Integration
 
 Beyond transport, leverage:
+
 - `IrohBundle::watch_addr()`: Subscribe to EndpointAddr changes (NAT rebinding via netwatch).
 - `IrohBundle::notify_network_change()`: Trigger addr refresh.
 - `IrohBundle::wait_online()` / `is_online()`: Ensure node ready before RPCs.
 
 **P2P Quickstart Extension**:
+
 ```rust
 let bundle = IrohBundle::builder(None).await?.finish().await;
 bundle.wait_online().await;  // Wait for holepunching/relays

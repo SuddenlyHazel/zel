@@ -7,11 +7,7 @@
 //! # Quick Start
 //!
 //! ```rust,no_run
-//! use zel_core::protocol::{zel_service, RequestContext, RpcServerBuilder, RpcClient};
-//! use zel_core::protocol::{RetryConfig, CircuitBreakerConfig};
-//! use zel_core::IrohBundle;
-//! use zel_types::ResourceError;
-//! use async_trait::async_trait;
+//! use zel_core::prelude::*;
 //! use std::time::Duration;
 //!
 //! // Define a service using the macro
@@ -98,7 +94,12 @@ pub use iroh_helpers::{
     Builder as BundleBuilder, BuilderError, IrohBundle, ShutdownListener, ShutdownReplier,
 };
 
+pub mod prelude;
 pub mod protocol;
 
 // Re-export shutdown types for convenience
 pub use protocol::{ShutdownError, ShutdownHandle};
+
+// Re-export commonly needed types at crate root for convenience
+pub use protocol::ResourceError;
+pub use protocol::ResourceErrorSeverity as ErrorSeverity;
