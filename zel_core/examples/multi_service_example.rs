@@ -13,13 +13,10 @@
 //! - Client access to different services
 //! - Server → Service → Resource hierarchy
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use zel_core::protocol::RequestContext;
-use zel_core::protocol::{zel_service, RpcServerBuilder};
+use zel_core::prelude::*;
 use zel_core::IrohBundle;
-use zel_types::ResourceError;
 
 // ============================================================================
 // Service 1: Calculator

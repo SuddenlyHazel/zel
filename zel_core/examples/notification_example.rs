@@ -7,12 +7,10 @@
 //!
 //! Expected: Client sends events, server processes/acks, stats query.
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use zel_core::protocol::{zel_service, RequestContext, RpcServerBuilder};
+use zel_core::prelude::*;
 use zel_core::IrohBundle;
-use zel_types::ResourceError;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum UserEvent {

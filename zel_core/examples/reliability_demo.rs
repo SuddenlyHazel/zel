@@ -33,16 +33,11 @@
 //! - Automatically recovers after timeout + successful requests
 
 use anyhow::{anyhow, Result};
-use bytes::Bytes;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use zel_core::protocol::ResourceResultExt;
-use zel_core::protocol::{
-    CircuitBreakerConfig, CircuitBreakerStats, ClientError, ErrorClassificationExt, ResourceError,
-    Response, RetryConfig, RpcClient, RpcServerBuilder,
-};
+use zel_core::prelude::*;
 use zel_core::IrohBundle;
 
 #[tokio::main]

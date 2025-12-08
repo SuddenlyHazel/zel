@@ -14,12 +14,11 @@
 //!
 //! Run with: `cargo run --example metrics_prometheus --features metrics`
 
-use bytes::Bytes;
 use futures::StreamExt;
 use iroh::Watcher;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use zel_core::protocol::{Body, RequestContext, Response, RpcServerBuilder};
+use zel_core::prelude::*;
 use zel_core::IrohBundle;
 
 #[cfg(feature = "metrics")]

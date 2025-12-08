@@ -15,13 +15,9 @@
 //! No metrics, stats objects, or extra layers.
 
 use anyhow::Result;
-use async_trait::async_trait;
 use std::time::Duration;
-use zel_core::protocol::{
-    zel_service, CircuitBreakerConfig, ClientError, RequestContext, RpcServerBuilder,
-};
+use zel_core::prelude::*;
 use zel_core::IrohBundle;
-use zel_types::ResourceError;
 
 // =============================================================================
 // Service definition using macros
