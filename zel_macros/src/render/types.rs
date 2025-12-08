@@ -105,13 +105,13 @@ pub fn render_typed_receiver(
                         None => return None,
                     };
 
-                    let msg: zel_core::protocol::NotificationMsg = match serde_json::from_slice(&bytes) {
+                    let msg: zel_types::protocol::NotificationMsg = match serde_json::from_slice(&bytes) {
                         Ok(m) => m,
                         Err(e) => return Some(Err(zel_core::protocol::NotificationError::Deserialization(e.to_string()))),
                     };
 
                     match msg {
-                        zel_core::protocol::NotificationMsg::Data(data) => {
+                        zel_types::protocol::NotificationMsg::Data(data) => {
                             let item: #item_type = match serde_json::from_slice(&data) {
                                 Ok(i) => i,
                                 Err(e) => return Some(Err(zel_core::protocol::NotificationError::Deserialization(e.to_string()))),
@@ -124,10 +124,10 @@ pub fn render_typed_receiver(
 
                             return Some(Ok(item));
                         }
-                        zel_core::protocol::NotificationMsg::Completed => {
+                        zel_types::protocol::NotificationMsg::Completed => {
                             return None;
                         }
-                        zel_core::protocol::NotificationMsg::ServerShutdown => {
+                        zel_types::protocol::NotificationMsg::ServerShutdown => {
                             // Server is shutting down gracefully
                             return None;
                         }
@@ -202,7 +202,7 @@ pub fn render_subscription_stream(
                 use futures::StreamExt;
 
                 match std::pin::Pin::new(&mut self.inner).poll_next(cx) {
-                    std::task::Poll::Ready(Some(Ok(zel_core::protocol::SubscriptionMsg::Data(data)))) => {
+                    std::task::Poll::Ready(Some(Ok(zel_types::protocol::SubscriptionMsg::Data(data)))) => {
                         match serde_json::from_slice::<#item_type>(&data) {
                             Ok(value) => std::task::Poll::Ready(Some(Ok(value))),
                             Err(e) => std::task::Poll::Ready(Some(Err(
@@ -210,14 +210,14 @@ pub fn render_subscription_stream(
                             ))),
                         }
                     }
-                    std::task::Poll::Ready(Some(Ok(zel_core::protocol::SubscriptionMsg::Stopped))) => {
+                    std::task::Poll::Ready(Some(Ok(zel_types::protocol::SubscriptionMsg::Stopped))) => {
                         std::task::Poll::Ready(None)
                     }
-                    std::task::Poll::Ready(Some(Ok(zel_core::protocol::SubscriptionMsg::ServerShutdown))) => {
+                    std::task::Poll::Ready(Some(Ok(zel_types::protocol::SubscriptionMsg::ServerShutdown))) => {
                         // Server is shutting down gracefully, close the stream
                         std::task::Poll::Ready(None)
                     }
-                    std::task::Poll::Ready(Some(Ok(zel_core::protocol::SubscriptionMsg::Established { .. }))) => {
+                    std::task::Poll::Ready(Some(Ok(zel_types::protocol::SubscriptionMsg::Established { .. }))) => {
                         // Skip the Established message and poll again
                         cx.waker().wake_by_ref();
                         std::task::Poll::Pending

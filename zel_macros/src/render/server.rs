@@ -214,11 +214,11 @@ pub fn render_method_registration(method: &MethodDescription) -> TokenStream2 {
             #method_name,
             {
                 let service = self.clone();
-                move |ctx: zel_core::protocol::RequestContext, req: zel_core::protocol::Request| {
+                move |ctx: zel_core::protocol::RequestContext, req: zel_types::protocol::Request| {
                     let service = service.clone();
                     Box::pin(async move {
                         // Extract body
-                        let zel_core::protocol::Body::Rpc(data) = &req.body else {
+                        let zel_types::protocol::Body::Rpc(data) = &req.body else {
                             return Err(zel_types::ResourceError::app("Expected RPC body"));
                         };
 
@@ -265,7 +265,7 @@ pub fn render_subscription_registration(
                 let service = self.clone();
                 move |
                     ctx: zel_core::protocol::RequestContext,
-                    req: zel_core::protocol::Request,
+                    req: zel_types::protocol::Request,
                     inner_sink: tokio_util::codec::FramedWrite<
                         iroh::endpoint::SendStream,
                         tokio_util::codec::LengthDelimitedCodec
@@ -275,10 +275,10 @@ pub fn render_subscription_registration(
                     Box::pin(async move {
                         // Extract body (for future parameter support)
                         let data = match &req.body {
-                            zel_core::protocol::Body::Subscribe => &[] as &[u8],
-                            zel_core::protocol::Body::Rpc(data) => data.as_ref(),
-                            zel_core::protocol::Body::Stream(data) => data.as_ref(),
-                            zel_core::protocol::Body::Notify(data) => data.as_ref(),
+                            zel_types::protocol::Body::Subscribe => &[] as &[u8],
+                            zel_types::protocol::Body::Rpc(data) => data.as_ref(),
+                            zel_types::protocol::Body::Stream(data) => data.as_ref(),
+                            zel_types::protocol::Body::Notify(data) => data.as_ref(),
                         };
 
                         // Deserialize params (if any)
@@ -291,7 +291,7 @@ pub fn render_subscription_registration(
                         // Call user's subscription method with context and typed sink
                         service.#rust_method(ctx, sink, #(#param_idents),*).await?;
 
-                        Ok(zel_core::protocol::Response {
+                        Ok(zel_types::protocol::Response {
                             data: bytes::Bytes::new()
                         })
                     })
@@ -322,7 +322,7 @@ pub fn render_notification_registration(
                 let service = self.clone();
                 move |
                     ctx: zel_core::protocol::RequestContext,
-                    req: zel_core::protocol::Request,
+                    req: zel_types::protocol::Request,
                     inner_rx: tokio_util::codec::FramedRead<
                         iroh::endpoint::RecvStream,
                         tokio_util::codec::LengthDelimitedCodec
@@ -336,8 +336,8 @@ pub fn render_notification_registration(
                     Box::pin(async move {
                         // Extract body (for parameter support)
                         let data = match &req.body {
-                            zel_core::protocol::Body::Notify(data) => data.as_ref(),
-                            zel_core::protocol::Body::Rpc(data) => data.as_ref(),
+                            zel_types::protocol::Body::Notify(data) => data.as_ref(),
+                            zel_types::protocol::Body::Rpc(data) => data.as_ref(),
                             _ => &[] as &[u8],
                         };
 
@@ -351,7 +351,7 @@ pub fn render_notification_registration(
                         // Call user's notification method with context and typed receiver
                         service.#rust_method(ctx, receiver, #(#param_idents),*).await?;
 
-                        Ok(zel_core::protocol::Response {
+                        Ok(zel_types::protocol::Response {
                             data: bytes::Bytes::new()
                         })
                     })
@@ -376,7 +376,7 @@ pub fn render_stream_registration(stream: &StreamDescription) -> TokenStream2 {
                 let service = self.clone();
                 move |
                     ctx: zel_core::protocol::RequestContext,
-                    req: zel_core::protocol::Request,
+                    req: zel_types::protocol::Request,
                     send: iroh::endpoint::SendStream,
                     recv: iroh::endpoint::RecvStream,
                 | {
@@ -384,7 +384,7 @@ pub fn render_stream_registration(stream: &StreamDescription) -> TokenStream2 {
                     Box::pin(async move {
                         // Extract body for parameter deserialization
                         let data = match &req.body {
-                            zel_core::protocol::Body::Stream(data) => data.as_ref(),
+                            zel_types::protocol::Body::Stream(data) => data.as_ref(),
                             _ => &[] as &[u8],
                         };
 
@@ -394,7 +394,7 @@ pub fn render_stream_registration(stream: &StreamDescription) -> TokenStream2 {
                         // Call user's stream method with context, raw streams, and params
                         service.#rust_method(ctx, send, recv, #(#param_idents),*).await?;
 
-                        Ok(zel_core::protocol::Response {
+                        Ok(zel_types::protocol::Response {
                             data: bytes::Bytes::new()
                         })
                     })

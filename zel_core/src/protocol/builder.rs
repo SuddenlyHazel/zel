@@ -16,8 +16,7 @@ use super::circuit_breaker_stats::CircuitBreakerStats;
 use super::context::RequestContext;
 use super::extensions::Extensions;
 use super::shutdown::TaskTracker;
-use super::types::Request;
-use super::{ResourceCallback, ResourceResponse, RpcService};
+use super::{Request, ResourceCallback, ResourceResponse, RpcService};
 
 // ============================================================================
 // Shutdown Error
