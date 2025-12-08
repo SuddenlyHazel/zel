@@ -1,10 +1,21 @@
-//! Shared error types for the Zel RPC framework.
+//! Shared types for the Zel RPC framework.
 //!
-//! This crate provides core error types and severity classifications used across
-//! the Zel ecosystem. It exists as a separate crate to allow both `zel_core` and
-//! `zel_macros` to depend on the same error types without circular dependencies.
+//! This crate provides core types used across the Zel ecosystem, including wire
+//! protocol definitions and error types. It exists as a separate crate to allow
+//! both `zel_core` and `zel_macros` to depend on the same types without circular
+//! dependencies.
 //!
 //! # Main Types
+//!
+//! ## Protocol Types
+//!
+//! - [`protocol::Request`] - RPC request structure
+//! - [`protocol::Response`] - RPC response structure
+//! - [`protocol::Body`] - Request body enum
+//! - [`protocol::SubscriptionMsg`] - Subscription stream messages
+//! - [`protocol::NotificationMsg`] - Notification stream messages
+//!
+//! ## Error Types
 //!
 //! - [`ResourceError`] - Error type returned by RPC resource handlers
 //! - [`ErrorSeverity`] - Classification for circuit breaker decisions
@@ -34,6 +45,27 @@
 //! let sys_err = ResourceError::system("Database unavailable");
 //! assert_eq!(sys_err.severity(), ErrorSeverity::SystemFailure);
 //! ```
+//!
+//! # Protocol Types
+//!
+//! ```rust
+//! use zel_types::protocol::{Request, Response, Body};
+//! use bytes::Bytes;
+//!
+//! // Create an RPC request
+//! let request = Request {
+//!     service: "my_service".to_string(),
+//!     resource: "my_method".to_string(),
+//!     body: Body::Rpc(Bytes::from("parameters")),
+//! };
+//!
+//! // Create a response
+//! let response = Response {
+//!     data: Bytes::from("result"),
+//! };
+//! ```
+
+pub mod protocol;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

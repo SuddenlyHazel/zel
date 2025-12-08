@@ -77,8 +77,8 @@ pub use builder::{
 // Re-export streaming types
 pub use streaming::{NotificationError, NotificationSink, SubscriptionError, SubscriptionSink};
 
-// Re-export core protocol types
-pub use types::{Body, NotificationMsg, Request, Response, SubscriptionMsg};
+// Re-export core protocol types from `zel_types` (migrated from local types module)
+pub use zel_types::protocol::{Body, NotificationMsg, Request, Response, SubscriptionMsg};
 
 // Shared protocol error types re-exported from `zel_types` so that both
 // `zel_core` and `zel_macros` can agree on the same surface.

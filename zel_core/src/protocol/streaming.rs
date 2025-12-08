@@ -9,7 +9,7 @@ use iroh::endpoint::SendStream;
 use serde::Serialize;
 use tokio_util::codec::{FramedWrite, LengthDelimitedCodec};
 
-use super::types::{NotificationMsg, SubscriptionMsg};
+use super::{NotificationMsg, SubscriptionMsg};
 
 // ============================================================================
 // Subscription Sink Wrapper
