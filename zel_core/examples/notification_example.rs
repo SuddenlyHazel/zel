@@ -115,11 +115,10 @@ async fn main() -> anyhow::Result<()> {
     let mut server_bundle = IrohBundle::builder(None).await?;
 
     let analytics = AnalyticsImpl::new();
-    let service_builder = RpcServerBuilder::new(b"analytics/1", server_bundle.endpoint().clone())
-        .service("analytics");
+    let server_builder = RpcServerBuilder::new(b"analytics/1", server_bundle.endpoint().clone());
 
-    let service_builder = analytics.into_service_builder(service_builder);
-    let server = service_builder.build().build();
+    let server_builder = analytics.register_service(server_builder);
+    let server = server_builder.build();
 
     println!("✓ Server built with analytics service");
 

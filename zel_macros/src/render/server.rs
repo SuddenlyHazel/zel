@@ -128,8 +128,8 @@ pub fn render_server_trait(service: &ServiceDescription) -> TokenStream2 {
         })
         .collect();
 
-    // Generate the into_service_builder method body
-    let into_builder_body = render_into_builder_body(service);
+    // Generate the register_service method body
+    let register_service_body = render_register_service_body(service);
 
     quote! {
         #[async_trait::async_trait]
@@ -139,20 +139,21 @@ pub fn render_server_trait(service: &ServiceDescription) -> TokenStream2 {
             #(#notifications)*
             #(#streams)*
 
-            /// Convert this service implementation into a ServiceBuilder with registered resources
-            fn into_service_builder(
+            /// Register this service implementation with an RpcServerBuilder
+            fn register_service(
                 self,
-                service_builder: zel_core::protocol::ServiceBuilder<'static>
-            ) -> zel_core::protocol::ServiceBuilder<'static> {
-                #into_builder_body
+                builder: zel_core::protocol::RpcServerBuilder<'static>
+            ) -> zel_core::protocol::RpcServerBuilder<'static> {
+                #register_service_body
             }
         }
     }
 }
 
-/// Render the body of the into_service_builder method
-pub fn render_into_builder_body(service: &ServiceDescription) -> TokenStream2 {
+/// Render the body of the register_service method
+pub fn render_register_service_body(service: &ServiceDescription) -> TokenStream2 {
     let trait_name = &service.trait_ident;
+    let service_name = &service.service_name;
 
     let method_registrations: Vec<_> = service
         .methods
@@ -179,7 +180,7 @@ pub fn render_into_builder_body(service: &ServiceDescription) -> TokenStream2 {
         .collect();
 
     quote! {
-        let service_builder = service_builder;
+        let service_builder = builder.service(#service_name);
 
         #(
             let service_builder = #method_registrations;
@@ -197,7 +198,7 @@ pub fn render_into_builder_body(service: &ServiceDescription) -> TokenStream2 {
             let service_builder = #stream_registrations;
         )*
 
-        service_builder
+        service_builder.build()
     }
 }
 

@@ -90,11 +90,10 @@ async fn main() -> Result<()> {
     let service_impl = DemoCircuitBreakerImpl;
 
     let server_builder = RpcServerBuilder::new(b"cb-macro/1", endpoint)
-        .with_circuit_breaker(cb_config)
-        .service("demo_cb");
+        .with_circuit_breaker(cb_config);
 
-    let server_builder = service_impl.into_service_builder(server_builder);
-    let server = server_builder.build().build();
+    let server_builder = service_impl.register_service(server_builder);
+    let server = server_builder.build();
 
     let server_id = server_bundle.endpoint().id();
     let server_bundle = server_bundle.accept(b"cb-macro/1", server).finish().await;

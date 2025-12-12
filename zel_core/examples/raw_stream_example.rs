@@ -126,10 +126,11 @@ async fn main() -> anyhow::Result<()> {
     let server_id = server_bundle.endpoint().id();
 
     let file_service = FileServiceImpl;
-    let server = RpcServerBuilder::new(b"file/1", server_bundle.endpoint().clone()).service("file");
+    let server_builder = RpcServerBuilder::new(b"file/1", server_bundle.endpoint().clone());
 
-    // Service uses the generated `into_service_builder` method
-    let server = file_service.into_service_builder(server).build().build();
+    // Service uses the generated `register_service` method
+    let server_builder = file_service.register_service(server_builder);
+    let server = server_builder.build();
     let server_bundle = server_bundle.accept(b"file/1", server).finish().await;
 
     // Create client

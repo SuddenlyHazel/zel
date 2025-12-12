@@ -367,7 +367,7 @@ async fn main() -> anyhow::Result<()> {
     let user_service = UserServiceImpl;
 
     // Add connection hook for authentication/session setup
-    let server = RpcServerBuilder::new(b"user/1", server_bundle.endpoint().clone())
+    let server_builder = RpcServerBuilder::new(b"user/1", server_bundle.endpoint().clone())
         .with_extensions(server_extensions)
         .with_connection_hook(|conn, _server_ext| {
             let remote_id = conn.remote_id();
@@ -385,10 +385,10 @@ async fn main() -> anyhow::Result<()> {
                 let timing = RequestTiming::new();
                 ctx.with_extension(trace_id).with_extension(timing)
             })
-        })
-        .service("user");
+        });
 
-    let server = user_service.into_service_builder(server).build().build();
+    let server_builder = user_service.register_service(server_builder);
+    let server = server_builder.build();
 
     let server_bundle = server_bundle.accept(b"user/1", server).finish().await;
 

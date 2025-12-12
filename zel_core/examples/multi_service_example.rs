@@ -169,16 +169,14 @@ async fn main() -> anyhow::Result<()> {
     let server_builder = RpcServerBuilder::new(b"multi/1", server_bundle.endpoint().clone());
 
     // Add Calculator service
-    let server_builder = server_builder.service("calculator");
-    let server_builder = calculator.into_service_builder(server_builder);
+    let server_builder = calculator.register_service(server_builder);
     println!("  ✓ Registered 'calculator' service with resources: add, multiply, counter");
 
     // Add Hello service
-    let server_builder = server_builder.build().service("hello");
-    let server_builder = hello.into_service_builder(server_builder);
+    let server_builder = hello.register_service(server_builder);
     println!("  ✓ Registered 'hello' service with resources: greet, farewell, notifications\n");
 
-    let server = server_builder.build().build();
+    let server = server_builder.build();
 
     let server_bundle = server_bundle.accept(b"multi/1", server).finish().await;
     println!("✓ Server listening on ALPN: multi/1");

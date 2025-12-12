@@ -96,13 +96,12 @@ async fn main() -> anyhow::Result<()> {
     let mut server_bundle = IrohBundle::builder(None).await?;
 
     let calculator = CalculatorImpl;
-    let service_builder =
-        RpcServerBuilder::new(b"calc/1", server_bundle.endpoint().clone()).service("calculator");
+    let server_builder = RpcServerBuilder::new(b"calc/1", server_bundle.endpoint().clone());
 
-    // Use the generated into_service_builder method
-    let service_builder = calculator.into_service_builder(service_builder);
+    // Use the generated register_service method
+    let server_builder = calculator.register_service(server_builder);
 
-    let server = service_builder.build().build();
+    let server = server_builder.build();
 
     println!("✓ Server built with calculator service");
 
